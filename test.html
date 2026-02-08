@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html>
+<body>
+  <h2>Upload Result PDF</h2>
+
+  <form action="http://127.0.0.1:5000/process" method="post" enctype="multipart/form-data">
+    Seat Number:<br>
+    <input type="text" name="seat" value="1402458"><br><br>
+
+    Select PDF:<br>
+    <input type="file" name="file"><br><br>
+
+    <button type="submit">Process</button>
+  </form>
+</body>
+</html>
