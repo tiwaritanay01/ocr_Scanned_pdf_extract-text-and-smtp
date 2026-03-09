@@ -1,0 +1,566 @@
+{~~  Yasantdada Patil Pratishthan's College of Engineering & Visual Arts  coiegecose 35% Co
+Clg ee 0 (ONBEHALFOFUNIVERSITY OFMUMBAD ~~ = EE TR fe Re
+SECOND YEAR COMPUTER ENGINEERING SEMESTER I V CBCGS) Examination held in MAY 2024
+Engineering Analysis Of | Database Operating |Microprocesso Analysis Of | Database Operating (Microprocesso Skill Base Lab Mini Project 1 Outof
+Mathematics -IV| Algorithm Management System r Algorithm Lab Management| System Lab r Lab Course: -B uto
+System System Lab Python 775
+: Programming
+Name of the Student. 3
+IA TOT| TW IA [TO IA TO IA [TO IA TOT|TW|P& TW, P& TOT|TW| P& ™ ™ TW|P& TOT|| Result
+Seat No. Maximum 20 [100] 25 20 (100 20 | 100 20 (100 20 (100 25 | 25 25(25|50(25]|25 25 25 2512550
+Minimum 8 [40 10 8 [40 8 | 40 8 | 40 8 |40 | 10 | 10 10 [10 (20 | 10 | 10 10 10 10 | 10 | 20 || EC ECG GPA
+1 | ALLU SANTOSH CHINTAMANI Marks 77 14 | 68 | 67 795716 | 73 37 560
+KAMALINI Obtained
+| mde Blo[a[B[c[BIColclal®|olB Dlcip|clo[n[alo]o]o]o]lo] c | & Tololo] P
+34001 onde] [Tele TE Te Ts Jel | [| Tw] | [we] 7 1 5 TT Tul
+| JECTED HW SO SS WO WW 24 190 7.92
+— eee LL Lat Tor | ae | Tel | swe] [jw] 7 | wT tw]?
+AMBRE SANKET VILAS KALPANA Marks 17 75 74 17 576
+| Obtained |
+Crd oololofalalalaTE[B[c([B|c(D|p|D|olclalolclalololo] & | 5 jojo] Pp
+| 24002 oradeP] | Toole] Tle mT TT ToT | Tel [ [oT [es | [wo] 1 | 5 1 1 Tul |
+BTC HF 0D A FS SS OO BS RR MRS 24 204 85 |
+rere 0 L_1w | | Taal | Tal | Gal | [el | o] T Tw] 0 | 36 | Ta] ™%
+[RRR ow 7 [MR] 0] TIS [WSS] STW aT STR ERE an [alae]
+BHUVANESHWAR | Obtained
+J 1 7m £0 24 183 7.63
+— reeset Lis] | uel T Test awl | [ef | wl | wl 8 | wo fw] ®"®
+ARDEKAR OMKAR PRAKASH POO.JA Marks| 78 57 72 75 21 40 43 631 :
+onde ololololofololBlAlB 6 0[alc|c[clo]o]o]0[al0]0l0l0o] © | © Tololo] r |
+34004 order] | Toliol Tom Ts 1 [751 | [wo] | wl | To] 0 | 0 TT Tul
+BRCCCTE 3 HE HE EC OW IO BA BR 24 222 925
+| JTree IC 3 SEN 71 0 CNC 1 A Nn 1 Il
+ARMORIKAR ISHAN DINESH JYOTI Marks 71 47 2 495
+| Opin EERE EEE EEE
+| romdel 8 cBlAlDIcIDlclalclp E|D|E[D|ElAl0[A]0[Al0[00]0] © | 5 [FlrlF] P
+34005 SradePel 1 slo Te 17 7 Tel | Isr | [of I [wl | Tel ww | 5s TT 4]
+BR RA nm En I I WB 3 24 168 7
+——— [OO [ Tule] | Jw] | [al | Tos] [ TasT To | fw | hl 0 | we | Ts]
+/:FEMALE #:0.229, @:0.5042, *:0.5045, ADC - Admission Cancelled, RR-Reserved, — : Fails in Theory or Practical, PRV - Provisional, RCC - 0.5050, A.ABS - Absent, F - Fails, P - Passes, NULL Null & MOE. IY ia Benefit/Person with Disability \ /
+G : Grade, GP : GradePoint, C : Credits, CP ; Credit Points, ECG : Sum of product of credits & grades, EC : Sum of Creditpoints, GPA : ECG / EC Vt A ZN ok OF . )
+Marks/Grade/GradePoint] : [>=80 and <=100/0/10] [>=75and <80/A/9] [>=70and <75/B/8§] [>=60and <70/C/7] [>=50and <60/D/6] [>=45and <50/E/5] [>=40 and <45/P/4] ff RE E20) £ N A Prindipal
+\& {= ArH 2 SQ ve ©\ | Vasantdada Patil Pratishthan’s College of
+Entered by : fr Read by : Je (/. Checked by:. Principal : \2 SE x We\ 400022 J Engineering and Visna' Arts
+SY > aut | >> 7 ¢) THosantdada Patil Education... | ..upiex, Eastes
+7 a 7 Xs Express Highway, Padmashushan Vasantdada
+. - o oh B Datel Aarmsr Oanvty MNMivovnbaons A H
+
+ee —,
+
+... Yasantdada Patil Pra
+
+ti
+
+shthan
+
+s College of Engineerine & V
+
+isual Arts
+
+356
+
+age
+
+SECOND YEAR COMPUTER ENGINEERING SEMESTER I'V (CBC
+
+Engineering
+
+Analysis Of
+
+Database
+
+Operating [Microprocessc
+
+Analysis Of
+
+Database
+
+Mathematics-1V| Algorithm | Management
+
+System
+
+r
+
+Algorithm Lab
+
+Operating (Microprocesso Skill Base Lab| Mini Project 1
+
+Outof
+
+System
+
+Management System Lab
+
+r Lab
+
+Course
+
+-B
+
+775
+
+System Lab
+
+Python
+
+Programming
+
+Name of the Student
+
+IA
+
+IA
+
+IA TOT TW
+
+TW, P&
+
+Seat No.
+
+Maximum
+
+20 |100( 25
+
+20 | 100
+
+20 | 100
+
+TON
+
+Result
+
+Minimum
+
+20 (100 25 | 25
+
+2512550
+
+25
+
+pag bw
+
+512550
+
+iE
+
+8 (40 | 10
+
+BE
+
+8 | 40
+
+:
+
+8 | 40
+
+8 401010
+
+10 | 10 | 20 [10 ( 10
+
+10 (10 | 20
+
+EC ECG GPa
+
+1 | ALLU SANTOSH CHINTAMANI
+
+EEE
+
+HH
+
+FH
+
+:
+
+KAMALINI
+
+560
+
+HENNE
+
+HE
+
+=
+
+Grade| 50 [A | ¥ |
+
+C| A
+
+| o|
+
+34001
+
+5
+
+EXER
+
+[
+
+clpliciol
+
+ihe
+
+FEE
+
+lo] [ [8]
+
+5
+
+| [0] T Jao 7 Ts
+
+AR
+
+[3[o[ TT [3]
+
+13 1 [sT T1811]
+
+| [1] |]
+
+A I I NR EF RN I RY
+
+190 7.92
+
+— orGE ||
+
+SER Seee— er Moret—e— ere C———re—
+
+27/8) | Jar]
+
+TE EE Ere Emr ES EEEEEMmvemes Ee re—— e—
+
+27] | [24] TT Tis| | [8]
+
+|_| [10]
+
+em: E——er SS——— re—
+
+AMBRE SANKET VILAS KALPANA
+
+—_—— |
+
+oma
+
+°
+
+576
+
+Ee
+
+hl
+
+EEE
+
+— Grade| 0 |
+
+0
+
+A
+
+is
+
+AO]
+
+i
+
+34002
+
+Grade Pt
+
+10 |
+
+:
+
+TE
+
+Er
+
+=
+
+0
+
+_ | T7] |
+
+:
+
+31] [Ta] [13]
+
+| [3
+
+| [1] 10 [8 | TT Tio]
+
+corer] [|
+
+[30/10] [ [27]
+
+[3] [ Tal | [1]
+
+A I A TN A PN PY
+
+204
+
+8.5
+
+3 |/ARALI SINDHU SURESH
+
+Ee — re a— eer e——re— — a
+
+—
+
+|_| [24] | Tar
+
+|_| [8] | Je | [9]
+
+EE ee E—mrra S—— ——re—
+
+|
+
+—_——————— J
+
+BHUVANESHWAR |
+
+513
+
+=
+
+shofsiotsls
+
+34003
+
+cits istelets slots
+
+colstots olele
+
+EE
+
+| GradePt] [ Tiol10] | |
+
+| s] [Tel Ts Te] |
+
+(9 | Tio] |
+
+| lw] 8 [10 | To]
+
+[Great] | [31] | |
+
+HU 2 I 0 I
+
+[1] | [1]
+
+| ceGPl | [sofw] | |
+
+_
+
+| (8 | [is] [| Tas | |
+
+IN IE NS EY ER I I BN PY
+
+183
+
+7.63
+
+(9 [ Jo]
+
+G0
+
+| fw] 8 | 20
+
+|_| [20]
+
+ARDEKAR OMKAR PRAKASH POOJA
+
+631
+
+ov
+
+| __ Grade]
+
+ee leletslotel
+
+34004
+
+|]
+
+00] | Jw[ [| T3]
+
+Wii
+
+iid
+
+sltelolotel
+
+i
+
+| 13]
+
+7] | 10
+
+| Two T fr] 30 10 |
+
+| | [10]
+
+HE HN I I FX I ED
+
+3] | T1]
+
+A I A
+
+| [2] 2
+
+222
+
+9.25
+
+ECE)
+
+A —— ieee
+
+[10] | [a0] [ Tae | Tor | |
+
+A SSSR Sen Seer SE Smee EE — re— ——re—
+
+Yn
+
+21] | Jeo] | Two
+
+| | Jo] 10 | 20 |
+
+ARMORIKAR ISHAN DINESH JYOTI
+
+rr
+
+tn
+
+HEE
+
+hl
+
+495
+
+i dl dl
+
+=
+
+|B |
+
+Cc [B]
+
+(A/D/cC[D]
+
+'D|E|D|E
+
+Mai
+
+foteet
+
+Wa
+
+34005
+
+[GradePt| | |)
+
+i
+
+| [6] [|
+
+| [10
+
+Credit Pe| ||
+
+| Tf 10 | sm Ta
+
+|__CPGP] | Tad]
+
+(of [ [8]
+
+IRE
+
+|_| 1]
+
+2 |] Tala
+
+168 7
+
+——— ee ——  —————
+
+ie
+
+— rr —)
+
+:
+
+re: Sie Eire — er —— me e——————
+
+| [10] | [10] 10
+
+re — —e—— —rere— m——
+
+16 | | [8]
+
+/:FEMALE,3#:0.229, @:0.5042, *:0.5045, ADC - Admission Cancelled, RR-Reserved,
+
+=~ : Fails in Theory or Practical, PRV - Provisional, RCC - 0.5050, A.ABS - Absent, F - Fails
+
+a —
+
+G : Grade, GP : GradePoint, C : Credits, CP ; Credit Points, ECG : Sum of product of cr
+
+=
+
+dits & grades, EC : Sum of Creditpoints, GPA : ECG / EC
+
+P- Passes NULL Null >
+
+Nexia Benefit/Person with D
+
+[Marks/Grade/GradePoint] : [>=80 and <=100/ 0 / 10
+
+2
+
+at
+
+AJ
+
+\/
+
+] [>=75and <80/A/9] [>=70and <75/B /8] [>=60and<70/C/7] [>=50and<60/D/ 6] [>=45and <5Q/E/5] [>=40and <45/P/ 4] /;
+
+{pt
+
+Af.
+
+Prindibal
+
+(). Checked by:
+
+Principal :
+
+= od
+
+Vasantdada Patil Pratishthan’s College of
+
+—"
+
+Read by : Jor
+
+Engineering and Visna' Arts
+
+=
+
+vat
+
+Aan oY
+
+Vasantdada Patil Education... « ..aplex, Eastes
+
+(7
+
+\N
+
+an
+
+# Express Highway, Padmashushan Vasantdzada
+
+Daze] Aas
+
+asvy MNAr1aan
+
+oo
