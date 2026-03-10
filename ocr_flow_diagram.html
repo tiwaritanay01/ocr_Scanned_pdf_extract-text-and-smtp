@@ -1,0 +1,812 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OCR Text Extraction & Display – Architectural Flow Diagram</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+    <style>
+        :root {
+            --bg: #0f111a;
+            --card-bg: #1a1d2e;
+            --accent: #6c63ff;
+            --accent-glow: rgba(108,99,255,0.35);
+            --green: #00e676;
+            --orange: #ff9100;
+            --red: #ff5252;
+            --cyan: #00e5ff;
+            --yellow: #ffd600;
+            --pink: #ff4081;
+            --text: #e0e0e0;
+            --muted: #8892b0;
+            --line: #3a3f5c;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 40px 20px 80px;
+        }
+
+        h1 {
+            font-size: 2rem;
+            font-weight: 800;
+            text-align: center;
+            margin-bottom: 8px;
+            background: linear-gradient(135deg, var(--accent), var(--cyan));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: -0.5px;
+        }
+        .subtitle {
+            color: var(--muted);
+            font-size: 0.95rem;
+            text-align: center;
+            margin-bottom: 40px;
+            max-width: 700px;
+        }
+
+        /* ── Legend ─────────────────────────── */
+        .legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 18px;
+            justify-content: center;
+            margin-bottom: 36px;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.82rem;
+            color: var(--muted);
+        }
+        .legend-shape {
+            width: 28px;
+            height: 20px;
+            border-radius: 4px;
+            border: 2px solid;
+            flex-shrink: 0;
+        }
+        .legend-shape.terminal { border-radius: 10px; border-color: var(--green); background: rgba(0,230,118,0.12); }
+        .legend-shape.process  { border-color: var(--accent); background: rgba(108,99,255,0.12); }
+        .legend-shape.decision { border-color: var(--orange); background: rgba(255,145,0,0.12); transform: rotate(45deg); width: 18px; height: 18px; border-radius: 2px; }
+        .legend-shape.io       { border-color: var(--cyan); background: rgba(0,229,255,0.12); transform: skewX(-12deg); }
+        .legend-shape.db       { border-color: var(--yellow); background: rgba(255,214,0,0.12); border-radius: 4px 4px 50% 50%; }
+        .legend-shape.sub      { border-color: var(--pink); background: rgba(255,64,129,0.12); border-left: 4px double var(--pink); border-right: 4px double var(--pink); }
+
+        /* ── Flowchart Canvas ─────────────── */
+        .flowchart {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 0;
+            width: 100%;
+            max-width: 960px;
+        }
+
+        /* Arrow connector */
+        .arrow {
+            width: 3px;
+            height: 32px;
+            background: var(--line);
+            position: relative;
+        }
+        .arrow::after {
+            content: '';
+            position: absolute;
+            bottom: -5px;
+            left: 50%;
+            transform: translateX(-50%);
+            border-left: 6px solid transparent;
+            border-right: 6px solid transparent;
+            border-top: 7px solid var(--line);
+        }
+        .arrow.short { height: 20px; }
+        .arrow-label {
+            position: absolute;
+            right: 14px;
+            top: 50%;
+            transform: translateY(-50%);
+            font-size: 0.7rem;
+            font-weight: 600;
+            padding: 2px 8px;
+            border-radius: 4px;
+            white-space: nowrap;
+        }
+        .arrow-label.yes { color: var(--green); background: rgba(0,230,118,0.1); }
+        .arrow-label.no  { color: var(--red); background: rgba(255,82,82,0.1); }
+
+        /* ── Node Base ─────────────────────── */
+        .node {
+            padding: 16px 28px;
+            border-radius: 12px;
+            text-align: center;
+            max-width: 600px;
+            width: 100%;
+            position: relative;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .node:hover {
+            transform: translateY(-2px);
+        }
+        .node .step-badge {
+            position: absolute;
+            top: -10px;
+            left: 16px;
+            font-size: 0.65rem;
+            font-weight: 700;
+            padding: 2px 10px;
+            border-radius: 6px;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+        }
+        .node h3 {
+            font-size: 0.95rem;
+            font-weight: 700;
+            margin-bottom: 4px;
+        }
+        .node p {
+            font-size: 0.8rem;
+            color: var(--muted);
+            line-height: 1.45;
+        }
+
+        /* Terminal (Start / End) */
+        .node.terminal {
+            border-radius: 50px;
+            border: 2px solid var(--green);
+            background: linear-gradient(135deg, rgba(0,230,118,0.08), rgba(0,229,255,0.05));
+            box-shadow: 0 0 20px rgba(0,230,118,0.1);
+            max-width: 300px;
+        }
+        .node.terminal h3 { color: var(--green); }
+        .node.terminal .step-badge { background: var(--green); color: var(--bg); }
+
+        /* Process */
+        .node.process {
+            border: 2px solid var(--accent);
+            background: linear-gradient(135deg, rgba(108,99,255,0.08), rgba(30,30,60,0.5));
+            box-shadow: 0 0 18px var(--accent-glow);
+        }
+        .node.process h3 { color: #a8a0ff; }
+        .node.process .step-badge { background: var(--accent); color: #fff; }
+
+        /* Decision (diamond appearance via CSS) */
+        .decision-wrapper {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            width: 100%;
+        }
+        .node.decision {
+            border: 2px solid var(--orange);
+            background: linear-gradient(135deg, rgba(255,145,0,0.1), rgba(40,30,20,0.5));
+            box-shadow: 0 0 18px rgba(255,145,0,0.15);
+            max-width: 520px;
+            /* Diamond styling via clip-path */
+            clip-path: polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%);
+            padding: 50px 60px;
+            border-radius: 0;
+        }
+        .node.decision h3 { color: var(--orange); font-size: 0.85rem; }
+        .node.decision .step-badge { display: none; }
+
+        /* Alternative decision card (no clip-path, but with diamond icon) */
+        .node.decision-card {
+            border: 2px solid var(--orange);
+            background: linear-gradient(135deg, rgba(255,145,0,0.1), rgba(40,30,20,0.5));
+            box-shadow: 0 0 18px rgba(255,145,0,0.15);
+            max-width: 520px;
+        }
+        .node.decision-card h3 { color: var(--orange); }
+        .node.decision-card h3::before {
+            content: '◆ ';
+            font-size: 0.7rem;
+            vertical-align: middle;
+        }
+        .node.decision-card .step-badge { background: var(--orange); color: var(--bg); }
+
+        /* I/O */
+        .node.io {
+            border: 2px solid var(--cyan);
+            background: linear-gradient(135deg, rgba(0,229,255,0.08), rgba(20,30,40,0.5));
+            box-shadow: 0 0 18px rgba(0,229,255,0.12);
+            transform: skewX(-4deg);
+        }
+        .node.io > * { transform: skewX(4deg); }
+        .node.io h3 { color: var(--cyan); }
+        .node.io .step-badge { background: var(--cyan); color: var(--bg); }
+        .node.io:hover { transform: skewX(-4deg) translateY(-2px); }
+
+        /* Database */
+        .node.db {
+            border: 2px solid var(--yellow);
+            background: linear-gradient(135deg, rgba(255,214,0,0.08), rgba(40,35,15,0.5));
+            box-shadow: 0 0 18px rgba(255,214,0,0.1);
+            border-radius: 8px 8px 30px 30px;
+        }
+        .node.db h3 { color: var(--yellow); }
+        .node.db .step-badge { background: var(--yellow); color: var(--bg); }
+
+        /* Sub-process */
+        .node.sub {
+            border: 2px solid var(--pink);
+            background: linear-gradient(135deg, rgba(255,64,129,0.08), rgba(40,20,30,0.5));
+            box-shadow: 0 0 18px rgba(255,64,129,0.1);
+            border-left: 5px double var(--pink);
+            border-right: 5px double var(--pink);
+        }
+        .node.sub h3 { color: var(--pink); }
+        .node.sub .step-badge { background: var(--pink); color: #fff; }
+
+        /* ── Branch (Yes/No fork) ──────────── */
+        .branch {
+            display: flex;
+            gap: 24px;
+            width: 100%;
+            max-width: 750px;
+            justify-content: center;
+        }
+        .branch-arm {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            flex: 1;
+            gap: 0;
+        }
+        .branch-label {
+            font-size: 0.75rem;
+            font-weight: 700;
+            padding: 3px 12px;
+            border-radius: 6px;
+            margin-bottom: 4px;
+        }
+        .branch-label.yes { color: var(--green); background: rgba(0,230,118,0.12); }
+        .branch-label.no  { color: var(--red); background: rgba(255,82,82,0.12); }
+
+        /* ── Merge arrow ──────────────────── */
+        .merge-connector {
+            width: 100%;
+            max-width: 750px;
+            display: flex;
+            align-items: stretch;
+            justify-content: center;
+            position: relative;
+            height: 36px;
+        }
+        .merge-connector::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 25%;
+            right: 25%;
+            height: 3px;
+            background: var(--line);
+        }
+        .merge-connector::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 3px;
+            height: 100%;
+            background: var(--line);
+        }
+
+        /* ── Section Divider ──────────────── */
+        .section-divider {
+            width: 100%;
+            max-width: 800px;
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            margin: 10px 0;
+        }
+        .section-divider .line {
+            flex: 1;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, var(--line), transparent);
+        }
+        .section-divider .label {
+            font-size: 0.7rem;
+            font-weight: 700;
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            white-space: nowrap;
+        }
+
+        /* ── Responsive ───────────────────── */
+        @media (max-width: 600px) {
+            .node { padding: 12px 16px; }
+            .branch { flex-direction: column; gap: 16px; }
+            h1 { font-size: 1.4rem; }
+        }
+
+        /* pulse animation for start/end */
+        @keyframes pulse { 0%,100% { box-shadow: 0 0 20px rgba(0,230,118,0.1); } 50% { box-shadow: 0 0 30px rgba(0,230,118,0.3); } }
+        .node.terminal { animation: pulse 3s ease-in-out infinite; }
+    </style>
+</head>
+<body>
+
+    <h1>OCR Text Extraction & Display — Architectural Flow</h1>
+    <p class="subtitle">
+        End-to-end technical workflow: from PDF upload through image preprocessing,
+        grid detection, OCR extraction, fuzzy matching, GPA parsing, to frontend display &amp; email dispatch.
+    </p>
+
+    <!-- Legend -->
+    <div class="legend">
+        <div class="legend-item"><div class="legend-shape terminal"></div>Start / End</div>
+        <div class="legend-item"><div class="legend-shape process"></div>Process Step</div>
+        <div class="legend-item"><div class="legend-shape decision"></div>Decision Step</div>
+        <div class="legend-item"><div class="legend-shape io"></div>Input / Output</div>
+        <div class="legend-item"><div class="legend-shape db"></div>Database</div>
+        <div class="legend-item"><div class="legend-shape sub"></div>Sub-Process</div>
+    </div>
+
+    <div class="flowchart">
+
+        <!-- ════════════ START ════════════ -->
+        <div class="node terminal">
+            <h3>🚀 START</h3>
+            <p>Dept-Admin initiates the process</p>
+        </div>
+
+        <div class="arrow"></div>
+
+        <!-- ═══ PHASE 1: INPUT ═══ -->
+        <div class="section-divider">
+            <div class="line"></div>
+            <div class="label">Phase 1 — Input &amp; Initialization</div>
+            <div class="line"></div>
+        </div>
+
+        <div class="arrow short"></div>
+
+        <div class="node io">
+            <span class="step-badge">Step 1</span>
+            <h3>📂 Upload Marksheet PDF</h3>
+            <p>Dept-Admin uploads scanned marksheet PDF via React frontend.<br>
+            API Endpoint: <code>POST /upload-marksheet</code> with file, semester, user info.</p>
+        </div>
+
+        <div class="arrow"></div>
+
+        <div class="node process">
+            <span class="step-badge">Step 2</span>
+            <h3>💾 Save Temp File &amp; Load Config</h3>
+            <p>Backend (FastAPI) saves PDF to <code>temp_uploads/</code> with unique UUID filename.<br>
+            Semester label &amp; expected names (if any) are stored.</p>
+        </div>
+
+        <div class="arrow"></div>
+
+        <div class="node db">
+            <span class="step-badge">Step 3</span>
+            <h3>🗄️ Load Ground-Truth Names from MySQL</h3>
+            <p>Query <code>student_name</code> table for all registered student names.<br>
+            Merge with any extra names from frontend &amp; Excel fallbacks.<br>
+            This forms the <strong>KNOWN_NAMES</strong> list for fuzzy matching.</p>
+        </div>
+
+        <div class="arrow"></div>
+
+        <!-- ═══ PHASE 2: IMAGE PREPROCESSING ═══ -->
+        <div class="section-divider">
+            <div class="line"></div>
+            <div class="label">Phase 2 — Image Preprocessing (per page)</div>
+            <div class="line"></div>
+        </div>
+
+        <div class="arrow short"></div>
+
+        <div class="node process">
+            <span class="step-badge">Step 4</span>
+            <h3>📄 PDF → High-Resolution Images</h3>
+            <p>Convert each PDF page to image at <strong>300 DPI</strong> using <code>pdf2image</code>.<br>
+            Each page processed independently in a loop.</p>
+        </div>
+
+        <div class="arrow"></div>
+
+        <div class="node process">
+            <span class="step-badge">Step 5</span>
+            <h3>🔲 Grayscale &amp; Adaptive Binarization</h3>
+            <p>Convert to grayscale → Apply <strong>Adaptive Gaussian Threshold</strong> (block=21, C=10)<br>
+            to produce inverted binary image (white lines on black background).</p>
+        </div>
+
+        <div class="arrow"></div>
+
+        <div class="node process">
+            <span class="step-badge">Step 6</span>
+            <h3>🔄 Deskew Correction</h3>
+            <p>Detect skew angle via <code>cv2.minAreaRect()</code> on binary foreground pixels.<br>
+            If |angle| &gt; 0.1°, rotate image using affine warp to straighten.<br>
+            Re-threshold after deskew for clean lines.</p>
+        </div>
+
+        <div class="arrow"></div>
+
+        <!-- ═══ PHASE 3: GRID DETECTION ═══ -->
+        <div class="section-divider">
+            <div class="line"></div>
+            <div class="label">Phase 3 — Vision-Based Grid Detection</div>
+            <div class="line"></div>
+        </div>
+
+        <div class="arrow short"></div>
+
+        <div class="node process">
+            <span class="step-badge">Step 7</span>
+            <h3>📐 Canny Edge Detection</h3>
+            <p>Apply <code>cv2.Canny(gray, 50, 150)</code> to detect edges.<br>
+            Then use morphological operations to isolate<br>
+            horizontal lines (wide kernel) and vertical lines (tall kernel).</p>
+        </div>
+
+        <div class="arrow"></div>
+
+        <div class="node process">
+            <span class="step-badge">Step 8</span>
+            <h3>📊 Extract Row &amp; Column Boundaries</h3>
+            <p>Project line images along axes → find peaks → cluster nearby peaks.<br>
+            Produces <strong>y_bounds[]</strong> (row positions) and <strong>x_bounds[]</strong> (column positions).</p>
+        </div>
+
+        <div class="arrow"></div>
+
+        <!-- DECISION: Grid sufficient? -->
+        <div class="node decision-card">
+            <span class="step-badge">Decision</span>
+            <h3>Sufficient Grid Structure?</h3>
+            <p>Check: x_bounds &ge; 3 AND y_bounds &ge; 10?</p>
+        </div>
+
+        <div class="branch">
+            <div class="branch-arm">
+                <div class="branch-label no">✗ NO — Sparse Grid</div>
+                <div class="arrow short"></div>
+                <div class="node sub">
+                    <h3>🔁 Fallback: Threshold-based Detection</h3>
+                    <p>Re-run <code>detect_lines()</code> on adaptive binary image.<br>
+                    Merge results if they yield more boundaries.</p>
+                </div>
+                <div class="arrow short"></div>
+                <div class="node decision-card">
+                    <h3>Still Insufficient? (x &lt; 2 or y &lt; 5)</h3>
+                    <p></p>
+                </div>
+                <div class="arrow short"></div>
+                <div style="display:flex;gap:16px;width:100%;justify-content:center;">
+                    <div style="display:flex;flex-direction:column;align-items:center;flex:1;">
+                        <div class="branch-label yes" style="margin-bottom:4px;">✓ YES</div>
+                        <div class="arrow short"></div>
+                        <div class="node process" style="font-size:.78rem;padding:10px 14px;">
+                            <h3 style="font-size:.82rem;">⏭️ Skip Page</h3>
+                            <p>Move to next page</p>
+                        </div>
+                    </div>
+                    <div style="display:flex;flex-direction:column;align-items:center;flex:1;">
+                        <div class="branch-label no" style="margin-bottom:4px;">✗ NO</div>
+                        <div class="arrow short"></div>
+                        <div class="node process" style="font-size:.78rem;padding:10px 14px;">
+                            <h3 style="font-size:.82rem;">✅ Continue</h3>
+                            <p>Proceed with available grid</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="branch-arm">
+                <div class="branch-label yes">✓ YES — Grid OK</div>
+                <div class="arrow short"></div>
+                <div class="node process" style="padding:10px 14px;">
+                    <h3 style="font-size:.85rem;">✅ Proceed to Column Detection</h3>
+                    <p></p>
+                </div>
+            </div>
+        </div>
+
+        <div class="merge-connector"></div>
+
+        <!-- ═══ PHASE 4: COLUMN DETECTION ═══ -->
+        <div class="section-divider">
+            <div class="line"></div>
+            <div class="label">Phase 4 — Adaptive Column Identification</div>
+            <div class="line"></div>
+        </div>
+
+        <div class="arrow short"></div>
+
+        <div class="node process">
+            <span class="step-badge">Step 9</span>
+            <h3>📏 Identify Name &amp; Result Columns</h3>
+            <p>Find the <strong>widest gap</strong> in the first 5 column boundaries → that's the <strong>Name Column</strong>.<br>
+            Result area: rightmost ~35% of the page.<br>
+            Handles variable left-margin layouts (extra thin border columns).</p>
+        </div>
+
+        <div class="arrow"></div>
+
+        <!-- ═══ PHASE 5: ROW-BY-ROW EXTRACTION ═══ -->
+        <div class="section-divider">
+            <div class="line"></div>
+            <div class="label">Phase 5 — Row-by-Row Student Detection &amp; Extraction</div>
+            <div class="line"></div>
+        </div>
+
+        <div class="arrow short"></div>
+
+        <div class="node process">
+            <span class="step-badge">Step 10</span>
+            <h3>🔁 Iterate Row Sub-Regions (while loop)</h3>
+            <p>For each row boundary pair, crop the Name column ROI.</p>
+        </div>
+
+        <div class="arrow"></div>
+
+        <div class="node sub">
+            <span class="step-badge">Step 11</span>
+            <h3>🔍 OCR + Upscale Name Region</h3>
+            <p>If ROI height &lt; 200px → bicubic upscale to 200px.<br>
+            Run Tesseract OCR (PSM 6) on the name cell.<br>
+            Scan ahead up to 5 sub-rows to find a valid name.</p>
+        </div>
+
+        <div class="arrow"></div>
+
+        <div class="node sub">
+            <span class="step-badge">Step 12</span>
+            <h3>🧠 Fuzzy Match Against KNOWN_NAMES</h3>
+            <p><strong>Strategy 1:</strong> <code>difflib.get_close_matches()</code> with cutoff ≥ 0.55<br>
+            <strong>Strategy 2:</strong> Substring containment for long names (&gt;10 chars)<br>
+            Noise filtering: reject headers (UNIVERSITY, SEMESTER, MARKS, etc.)</p>
+        </div>
+
+        <div class="arrow"></div>
+
+        <!-- DECISION: Name matched? -->
+        <div class="node decision-card">
+            <span class="step-badge">Decision</span>
+            <h3>Valid Student Name Found?</h3>
+            <p>Is the match score ≥ cutoff AND not already seen?</p>
+        </div>
+
+        <div class="branch">
+            <div class="branch-arm">
+                <div class="branch-label no">✗ NO</div>
+                <div class="arrow short"></div>
+                <div class="node process" style="padding:10px 14px;">
+                    <h3 style="font-size:.85rem;">⏭️ Skip Row, i += 1</h3>
+                    <p>Continue to next sub-row</p>
+                </div>
+            </div>
+            <div class="branch-arm">
+                <div class="branch-label yes">✓ YES</div>
+                <div class="arrow short"></div>
+                <div class="node process" style="padding:10px 14px;">
+                    <h3 style="font-size:.85rem;">📌 Lock Student Block</h3>
+                    <p>Detect block end via next name / Sr No</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="merge-connector"></div>
+
+        <!-- ═══ PHASE 6: GPA EXTRACTION ═══ -->
+        <div class="section-divider">
+            <div class="line"></div>
+            <div class="label">Phase 6 — Multi-Mode GPA Extraction</div>
+            <div class="line"></div>
+        </div>
+
+        <div class="arrow short"></div>
+
+        <div class="node process">
+            <span class="step-badge">Step 13</span>
+            <h3>🅰️ Mode A: Composite Block OCR</h3>
+            <p>Crop entire right portion (65%→edge) of student block.<br>
+            Run OCR with PSM 3 &amp; PSM 6. Parse for last valid float in 4.0–10.0 range.</p>
+        </div>
+
+        <div class="arrow"></div>
+
+        <!-- DECISION: GPA found? -->
+        <div class="node decision-card">
+            <span class="step-badge">Decision</span>
+            <h3>GPA Extracted?</h3>
+            <p>Was a valid GPA value (4.0–10.0) detected OR FAIL status found?</p>
+        </div>
+
+        <div class="branch">
+            <div class="branch-arm">
+                <div class="branch-label no">✗ NO — Fallback</div>
+                <div class="arrow short"></div>
+                <div class="node process">
+                    <span class="step-badge">Step 14</span>
+                    <h3>🅱️ Mode B: Row-by-Row Fallback</h3>
+                    <p>Scan each sub-row individually with PSM 6 &amp; PSM 11.<br>
+                    Parse each for GPA/FAIL status.</p>
+                </div>
+                <div class="arrow short"></div>
+                <div class="node decision-card">
+                    <h3>GPA Extracted Now?</h3>
+                    <p></p>
+                </div>
+                <div class="arrow short"></div>
+                <div style="display:flex;gap:16px;width:100%;justify-content:center;">
+                    <div style="display:flex;flex-direction:column;align-items:center;flex:1;">
+                        <div class="branch-label no" style="margin-bottom:4px;">✗ NO</div>
+                        <div class="arrow short"></div>
+                        <div class="node process" style="font-size:.78rem;padding:10px 14px;">
+                            <h3 style="font-size:.82rem;">🅲 Mode C: Last-Column Scan</h3>
+                            <p>Scan rightmost 2 columns with PSM 6, 7, 11</p>
+                        </div>
+                    </div>
+                    <div style="display:flex;flex-direction:column;align-items:center;flex:1;">
+                        <div class="branch-label yes" style="margin-bottom:4px;">✓ YES</div>
+                        <div class="arrow short"></div>
+                        <div class="node process" style="font-size:.78rem;padding:10px 14px;">
+                            <h3 style="font-size:.82rem;">✅ GPA Locked</h3>
+                            <p>Proceed with extracted value</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="branch-arm">
+                <div class="branch-label yes">✓ YES</div>
+                <div class="arrow short"></div>
+                <div class="node process" style="padding:10px 14px;">
+                    <h3 style="font-size:.85rem;">✅ GPA Locked</h3>
+                    <p>Proceed with extracted GPA &amp; Status</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="merge-connector"></div>
+
+        <div class="arrow short"></div>
+
+        <div class="node sub">
+            <span class="step-badge">Step 15</span>
+            <h3>📋 Status Detection (PASS / FAIL)</h3>
+            <p>Fail-first logic: regex for <code>\bFAIL\b</code>, <code>\bATKT\b</code>, <code>NULL</code>, <code>(F)</code>.<br>
+            If none found → Status = <strong>PASS</strong>. GPA set to 0.0 on FAIL.</p>
+        </div>
+
+        <div class="arrow"></div>
+
+        <div class="node process">
+            <span class="step-badge">Step 16</span>
+            <h3>📝 Append Result Tuple</h3>
+            <p>Add <code>(student_name, gpa, status)</code> to results list.<br>
+            Mark name as <strong>seen</strong> to prevent duplicates. Move to next block.</p>
+        </div>
+
+        <div class="arrow"></div>
+
+        <!-- DECISION: More rows? -->
+        <div class="node decision-card">
+            <span class="step-badge">Decision</span>
+            <h3>More Rows / Pages Remaining?</h3>
+            <p>Loop back until all sub-rows and all pages are processed.</p>
+        </div>
+
+        <div class="branch">
+            <div class="branch-arm">
+                <div class="branch-label yes">✓ YES</div>
+                <div class="arrow short"></div>
+                <div class="node process" style="padding:10px 14px;">
+                    <h3 style="font-size:.85rem;">🔁 Loop Back to Step 10</h3>
+                    <p>Process next row / next page</p>
+                </div>
+            </div>
+            <div class="branch-arm">
+                <div class="branch-label no">✗ NO — All Done</div>
+                <div class="arrow short"></div>
+                <div class="node process" style="padding:10px 14px;">
+                    <h3 style="font-size:.85rem;">✅ Extraction Complete</h3>
+                    <p>Return full results list to API</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="merge-connector"></div>
+
+        <!-- ═══ PHASE 7: OUTPUT ═══ -->
+        <div class="section-divider">
+            <div class="line"></div>
+            <div class="label">Phase 7 — Output Formatting &amp; Display</div>
+            <div class="line"></div>
+        </div>
+
+        <div class="arrow short"></div>
+
+        <div class="node process">
+            <span class="step-badge">Step 17</span>
+            <h3>🧹 Format Results for Frontend</h3>
+            <p>Build JSON response: assign GPA to target semester, set status to PASS/FAIL,<br>
+            generate roll numbers, student emails. Identify <strong>undetected students</strong><br>
+            (in DB but not found by OCR) for manual entry notification.</p>
+        </div>
+
+        <div class="arrow"></div>
+
+        <div class="node io">
+            <span class="step-badge">Step 18</span>
+            <h3>📊 Display Results on React Frontend</h3>
+            <p>JSON response rendered as an interactive student results table.<br>
+            Dept-Admin reviews, edits (if needed), and confirms the data.<br>
+            Undetected students flagged for manual GPA entry.</p>
+        </div>
+
+        <div class="arrow"></div>
+
+        <!-- DECISION: Send emails? -->
+        <div class="node decision-card">
+            <span class="step-badge">Decision</span>
+            <h3>Admin Triggers Email Dispatch?</h3>
+            <p>Does Dept-Admin click "Send Results via Email"?</p>
+        </div>
+
+        <div class="branch">
+            <div class="branch-arm">
+                <div class="branch-label yes">✓ YES</div>
+                <div class="arrow short"></div>
+                <div class="node process">
+                    <span class="step-badge">Step 19</span>
+                    <h3>📧 SMTP Email Dispatch</h3>
+                    <p>Iterate over students → compose personalized email with name, GPA, avg pointer.<br>
+                    Send via Gmail SMTP (<code>POST /send-results</code>).<br>
+                    Log success/failure count.</p>
+                </div>
+            </div>
+            <div class="branch-arm">
+                <div class="branch-label no">✗ NO</div>
+                <div class="arrow short"></div>
+                <div class="node process" style="padding:10px 14px;">
+                    <h3 style="font-size:.85rem;">📋 Results Displayed Only</h3>
+                    <p>Data available on dashboard for review</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="merge-connector"></div>
+
+        <div class="arrow short"></div>
+
+        <div class="node process">
+            <span class="step-badge">Step 20</span>
+            <h3>📝 Activity Logging</h3>
+            <p>Log the action (Result Generation / Bulk Mailing) with timestamp,<br>
+            user name, and details for Super-Admin audit trail. Cleanup temp files.</p>
+        </div>
+
+        <div class="arrow"></div>
+
+        <!-- ════════════ END ════════════ -->
+        <div class="node terminal">
+            <h3>🏁 END</h3>
+            <p>Process complete — results extracted &amp; delivered</p>
+        </div>
+
+    </div>
+
+    <!-- ── Watermark ── -->
+    <p style="margin-top:60px;color:var(--muted);font-size:0.7rem;opacity:0.5;">
+        OCR Pipeline Architectural Diagram — Generated for MailResults Mini Project
+    </p>
+
+</body>
+</html>
