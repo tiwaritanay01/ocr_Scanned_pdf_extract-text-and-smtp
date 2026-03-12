@@ -60,7 +60,6 @@ USERS = {
 class LoginRequest(BaseModel):
     email: str
     password: str
-    role: str
 
 class StudentResult(BaseModel):
     name: str
@@ -132,8 +131,8 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 @app.post("/login")
 async def login(req: LoginRequest):
     user = USERS.get(req.email)
-    if user and user["password"] == req.password and user["role"] == req.role:
-        add_log(user["name"], "Login", f"Logged into {user['dept']} portal")
+    if user and user["password"] == req.password:
+        add_log(user["name"], "Login", f"Logged into system via unified gateway")
         return {
             "success": True, 
             "user": {
@@ -144,8 +143,8 @@ async def login(req: LoginRequest):
             }
         }
     
-    add_log(req.email, "Failed Login", f"Attempted login as {req.role}", "Failed")
-    raise HTTPException(status_code=401, detail="Invalid credentials or role")
+    add_log(req.email, "Failed Login", f"Failed attempt on unified gateway", "Failed")
+    raise HTTPException(status_code=401, detail="Invalid email or password")
 
 @app.get("/logs")
 async def get_logs():
