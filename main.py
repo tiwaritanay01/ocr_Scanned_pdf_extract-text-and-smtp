@@ -184,6 +184,7 @@ async def upload_marksheet_stream(file: UploadFile = File(...), user_name: str =
     if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are allowed")
     
+    add_log(user_name, "PDF Upload", f"Processing {file.filename} for {semester}")
     file_id = str(uuid.uuid4())
     temp_file_path = os.path.join(UPLOAD_DIR, f"{file_id}_{file.filename}")
     
@@ -247,4 +248,5 @@ async def upload_marksheet_stream(file: UploadFile = File(...), user_name: str =
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    print("[Main] Starting Uvicorn on http://127.0.0.1:8000")
+    uvicorn.run(app, host="127.0.0.1", port=8000)
