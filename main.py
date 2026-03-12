@@ -180,87 +180,71 @@ async def send_results(req: MailResultsRequest):
     
     return {"success": True, "sent": success_count, "failed": fail_count}
 
-@app.post("/upload-marksheet")
-async def upload_marksheet(file: UploadFile = File(...), user_name: str = "Anonymous", semester: str = "sem3", expected_names: str = Form(None)):
+@app.post("/upload-marksheet-stream")
+async def upload_marksheet_stream(file: UploadFile = File(...), user_name: str = "Anonymous", semester: str = "sem3", expected_names: str = Form(None)):
     if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are allowed")
     
     file_id = str(uuid.uuid4())
     temp_file_path = os.path.join(UPLOAD_DIR, f"{file_id}_{file.filename}")
     
-    try:
-        with open(temp_file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        
-        # 1. Always load from DB first (ground truth student_name table)
-        name_list = get_db_student_names()
-        
-        # 2. Optionally merge with any names passed by frontend
-        if expected_names:
-            import json
-            extra_names = json.loads(expected_names)
-            existing_set = set(name_list)
-            for n in extra_names:
-                if n not in existing_set:
-                    name_list.append(n)
-        
-        # 3. Write to temp_students.xlsx so marksheet.py picks it up for fuzzy matching
-        if name_list:
-            import pandas as pd
-            df = pd.DataFrame({"Name": name_list})
-            df.to_excel("temp_students.xlsx", index=False)
-            import importlib
-            import general_marks_scan
-            importlib.reload(general_marks_scan)
+    with open(temp_file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    
+    # 1. Always load from DB first
+    name_list = get_db_student_names()
+    
+    # 2. Optionally merge with any names passed by frontend
+    if expected_names:
+        import json
+        extra_names = json.loads(expected_names)
+        existing_set = set(name_list)
+        for n in extra_names:
+            if n not in existing_set:
+                name_list.append(n)
+    
+    # 3. Write to temp_students.xlsx for fuzzy matching
+    if name_list:
+        import pandas as pd
+        df = pd.DataFrame({"Name": name_list})
+        df.to_excel("temp_students.xlsx", index=False)
+        import importlib
+        import general_marks_scan
+        importlib.reload(general_marks_scan)
 
-        # Process the marksheet using the generalized pipeline
-        from general_marks_scan import process_marksheet
-        results = process_marksheet(temp_file_path)
-        
-        # Log the generation attempt with semester info
-        add_log(user_name, "Result Generation", f"Processed PDF: {file.filename} for {semester.upper()}")
+    from general_marks_scan import process_marksheet_iter
+    from fastapi.responses import StreamingResponse
+    import json
 
-        # Format results for frontend
-        formatted_results = []
-        extracted_names = []
-        for i, (name, gpa, status) in enumerate(results):
-            extracted_names.append(name)
-            # Create a dynamic marks object based on the requested semester
-            student_marks = {
-                "sem3": 0.0,
-                "sem4": 0.0,
-                "sem5": 0.0,
-                "sem6": 0.0,
-                "status": "PASS" if status == "P" else "FAIL"
-            }
-            # Assign the OCR result to the specific semester requested
-            student_marks[semester] = gpa if status == "P" else 0.0
+    def generate_results():
+        try:
+            for page_data in process_marksheet_iter(temp_file_path):
+                # Format results for this page
+                formatted_students = []
+                for s in page_data["students"]:
+                    formatted_students.append({
+                        "name": s["name"],
+                        "ocr_result": {
+                            "gpa": s["gpa"],
+                            "status": s["status"]
+                        }
+                    })
+                
+                chunk = {
+                    "page": page_data["page"],
+                    "total_pages": page_data["total_pages"],
+                    "students": formatted_students,
+                    "target_semester": semester
+                }
+                yield json.dumps(chunk) + "\n"
+        finally:
+            # Clean up temp files after streaming is done
+            if os.path.exists(temp_file_path):
+                os.remove(temp_file_path)
+            if os.path.exists("temp_students.xlsx"):
+                os.remove("temp_students.xlsx")
 
-            formatted_results.append({
-                "id": i + 1,
-                "name": name,
-                "roll": f"EXT-{100+i}",
-                "email": f"{name.lower().replace(' ', '.')}@college.edu",
-                "marks": student_marks
-            })
-            
-        undetected = []
-        if name_list:
-            for ename in name_list:
-                if ename not in extracted_names:
-                    undetected.append(ename)
-
-        return {"students": formatted_results, "target_semester": semester, "undetected": undetected}
-        
-    except Exception as e:
-        add_log(user_name, "Result Generation", f"Error: {str(e)}", "Error")
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        # Clean up temp file
-        if os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
-        if os.path.exists("temp_students.xlsx"):
-            os.remove("temp_students.xlsx")
+    return StreamingResponse(generate_results(), media_type="application/x-ndjson")
 
 if __name__ == "__main__":
     import uvicorn

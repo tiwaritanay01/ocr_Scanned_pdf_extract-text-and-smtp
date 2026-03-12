@@ -253,23 +253,22 @@ def find_name_and_result_columns(x_bounds, img_width):
 # Step 3: Main Pipeline
 # ─────────────────────────────────────────────────────────────
 
-def process_marksheet(pdf_path):
+def process_marksheet_iter(pdf_path):
     """
-    Generalized marksheet processing pipeline.
-    Works across different page layouts and PDF chunks.
+    Iterator version of marksheet processing. Yields results per page.
     """
     print(f"[Pipeline] Starting on {pdf_path}")
     try:
         pages = convert_from_path(pdf_path, dpi=300)
     except Exception as e:
         print(f"[Error] PDF conversion failed: {e}")
-        return []
+        return
 
-    results = []
     seen_names = set()
 
     for page_num, pil_img in enumerate(pages):
         print(f"\n[Page {page_num+1}/{len(pages)}]")
+        page_results = []
 
         # ── 1. Image Preprocessing ──
         img = np.array(pil_img)[:, :, ::-1].copy()
@@ -299,16 +298,14 @@ def process_marksheet(pdf_path):
                 )
 
         # ── 2. Grid Detection ──
-        # Primary: Canny edges
         edges = cv2.Canny(gray, 50, 150, apertureSize=3)
         h_lines, v_lines = detect_lines(edges)
 
         y_bounds = get_boundaries(h_lines, axis=1, min_dist=25)
         x_bounds = get_boundaries(v_lines, axis=0, min_dist=40)
 
-        # Fallback: Adaptive threshold if Canny yields too few lines
+        # Fallback
         if len(x_bounds) < 3 or len(y_bounds) < 10:
-            print(f"  WARN: Sparse grid (x:{len(x_bounds)}, y:{len(y_bounds)}), trying threshold fallback")
             h_lines_fb, v_lines_fb = detect_lines(binary_inv)
             y_bounds_fb = get_boundaries(h_lines_fb, axis=1, min_dist=25)
             x_bounds_fb = get_boundaries(v_lines_fb, axis=0, min_dist=40)
@@ -318,30 +315,15 @@ def process_marksheet(pdf_path):
                 x_bounds = x_bounds_fb
 
         if len(x_bounds) < 2 or len(y_bounds) < 5:
-            print(f"  [X] Skipping page: insufficient grid structure")
+            yield {"page": page_num + 1, "students": []}
             continue
 
         # ── 3. Adaptive Column Detection ──
         name_x0, name_x1, result_x0, sr_x0 = find_name_and_result_columns(x_bounds, img.shape[1])
-        print(f"  Grid: {len(x_bounds)} cols × {len(y_bounds)} rows | Name: [{name_x0}:{name_x1}] | Result: [{result_x0}:]")
-
-        # Debug visualization
-        debug_vis = img.copy()
-        for y in y_bounds:
-            cv2.line(debug_vis, (0, y), (img.shape[1], y), (0, 0, 255), 1)
-        for x in x_bounds:
-            cv2.line(debug_vis, (x, 0), (x, img.shape[0]), (255, 0, 0), 1)
-        # Mark name column in green, result area in blue
-        cv2.line(debug_vis, (name_x0, 0), (name_x0, img.shape[0]), (0, 255, 0), 2)
-        cv2.line(debug_vis, (name_x1, 0), (name_x1, img.shape[0]), (0, 255, 0), 2)
-        cv2.line(debug_vis, (result_x0, 0), (result_x0, img.shape[0]), (255, 255, 0), 2)
-        cv2.imwrite(f"debug_general_grid_p{page_num+1}.jpg", debug_vis)
 
         # ── 4. Row-by-Row Student + Result Extraction ──
         i = 0
-        page_student_count = 0
         while i < len(y_bounds) - 1:
-            # ── 4a. Name Detection: Scan ahead up to 5 sub-rows ──
             matched_name = None
             match_row_idx = i
 
@@ -362,32 +344,24 @@ def process_marksheet(pdf_path):
                 i += 1
                 continue
 
-            # ── 4b. Block End Detection ──
-            # Find where the next student starts (next name or next Sr No)
             block_end_i = min(i + 15, len(y_bounds) - 1)
             for k in range(i + 3, block_end_i):
                 if k + 1 >= len(y_bounds):
                     break
-                # Check for next student name
                 chk_n_roi = gray[y_bounds[k]:y_bounds[k+1], name_x0:name_x1]
                 chk_n_text = ocr_upscaled(chk_n_roi, psm=6)
                 m_n, _ = fuzzy_match_entity(chk_n_text, KNOWN_NAMES)
                 if m_n and m_n != matched_name:
                     block_end_i = k
                     break
-                # Check for sequential number (Sr No)
                 chk_sr_roi = gray[y_bounds[k]:y_bounds[k+1], sr_x0:name_x0]
                 chk_sr_text = ocr_upscaled(chk_sr_roi, psm=6).strip()
                 if re.search(r'^\d{1,3}$', chk_sr_text):
                     block_end_i = k
                     break
 
-            # ── 4c. Result Extraction: Multi-mode scan ──
             best_gpa = 0.0
             best_status = "P"
-
-            # Mode A: Composite Block OCR
-            # Scan the entire right portion of the student block at once
             block_roi = gray[y_bounds[i]:y_bounds[block_end_i], result_x0:img.shape[1]-10]
             for pval in [3, 6]:
                 txt = ocr_upscaled(block_roi, psm=pval).upper()
@@ -398,7 +372,6 @@ def process_marksheet(pdf_path):
                 if g > 0:
                     best_gpa, best_status = g, s
 
-            # Mode B: Row-by-row fallback (if block OCR missed the GPA)
             if best_gpa == 0.0 and best_status == "P":
                 for k_sub in range(i, block_end_i):
                     if k_sub + 1 >= len(y_bounds):
@@ -415,7 +388,6 @@ def process_marksheet(pdf_path):
                     if best_status == "F" or best_gpa > 0:
                         break
 
-            # Mode C: Targeted last-column scan (rightmost 2 columns)
             if best_gpa == 0.0 and best_status == "P" and len(x_bounds) > 2:
                 last_col_x0 = x_bounds[-2]
                 for k_sub in range(block_end_i - 1, i, -1):
@@ -434,16 +406,18 @@ def process_marksheet(pdf_path):
                     if best_status == "F" or best_gpa > 0:
                         break
 
-            results.append((matched_name, best_gpa, best_status))
+            page_results.append({"name": matched_name, "gpa": best_gpa, "status": best_status})
             seen_names.add(matched_name)
-            page_student_count += 1
-            print(f"  [+] {matched_name} | GPA: {best_gpa} | {best_status}")
             i = block_end_i
 
-        if page_student_count == 0:
-            print(f"  [X] No students detected on this page")
+        yield {"page": page_num + 1, "total_pages": len(pages), "students": page_results}
 
-    return results
+def process_marksheet(pdf_path):
+    all_results = []
+    for chunk in process_marksheet_iter(pdf_path):
+        for s in chunk["students"]:
+            all_results.append((s["name"], s["gpa"], s["status"]))
+    return all_results
 
 
 # ─────────────────────────────────────────────────────────────
