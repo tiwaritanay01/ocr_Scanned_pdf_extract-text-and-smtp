@@ -1,0 +1,14 @@
+*.docx
+*.pdf
+*.xlsx
+__pycache__/
+node_modules/
+.env
+debug_*.jpg
+debug_*.txt
+debug_*.png
+temp_*.pdf
+temp_*.xlsx
+raw_ocr_output.txt
+raw_ocr_output_utf8.txt
+extracted_results.csv
