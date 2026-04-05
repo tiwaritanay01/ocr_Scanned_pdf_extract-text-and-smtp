@@ -295,6 +295,175 @@ async def upload_marksheet_stream(file: UploadFile = File(...), user_name: str =
 
     return StreamingResponse(generate_results(), media_type="application/x-ndjson")
 
+@app.get("/db/tables")
+async def list_db_tables():
+    try:
+        conn = mysql.connector.connect(
+            host=os.getenv("DB_HOST", "127.0.0.1"),
+            user=os.getenv("DB_USER", "root"),
+            password="root123",
+            database=os.getenv("DB_NAME", "student_results")
+        )
+        cursor = conn.cursor()
+        cursor.execute("SHOW TABLES")
+        tables = [t[0] for t in cursor.fetchall()]
+        cursor.close()
+        conn.close()
+        return {"success": True, "tables": tables}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/db/table/{table_name}")
+async def get_table_data(table_name: str):
+    try:
+        conn = mysql.connector.connect(
+            host=os.getenv("DB_HOST", "127.0.0.1"),
+            user=os.getenv("DB_USER", "root"),
+            password="root123",
+            database=os.getenv("DB_NAME", "student_results")
+        )
+        cursor = conn.cursor()
+        
+        # Get data
+        cursor.execute(f"SELECT * FROM {table_name}")
+        columns = [col[0] for col in cursor.description]
+        rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        
+        # Get schema (DESCRIBE returns: Field, Type, Null, Key, Default, Extra)
+        cursor.execute(f"DESCRIBE {table_name}")
+        schema = cursor.fetchall()
+        
+        cursor.close()
+        conn.close()
+        return {"success": True, "data": rows, "schema": schema}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+class DBUpdateRequest(BaseModel):
+    table: str
+    pk_field: str
+    pk_value: str
+    data: dict
+
+@app.post("/db/update-row")
+async def update_db_row(req: DBUpdateRequest):
+    try:
+        conn = mysql.connector.connect(
+            host=os.getenv("DB_HOST", "127.0.0.1"),
+            user=os.getenv("DB_USER", "root"),
+            password="root123",
+            database=os.getenv("DB_NAME", "student_results")
+        )
+        cursor = conn.cursor()
+        
+        set_clause = ", ".join([f"{k} = %s" for k in req.data.keys()])
+        values = list(req.data.values())
+        values.append(req.pk_value)
+        
+        query = f"UPDATE {req.table} SET {set_clause} WHERE {req.pk_field} = %s"
+        cursor.execute(query, tuple(values))
+        conn.commit()
+        
+        cursor.close()
+        conn.close()
+        return {"success": True, "message": "Row updated successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+class DBAddRowRequest(BaseModel):
+    table: str
+    data: dict
+
+@app.post("/db/add-row")
+async def add_db_row(req: DBAddRowRequest):
+    try:
+        conn = mysql.connector.connect(
+            host=os.getenv("DB_HOST", "127.0.0.1"),
+            user=os.getenv("DB_USER", "root"),
+            password="root123",
+            database=os.getenv("DB_NAME", "student_results")
+        )
+        cursor = conn.cursor()
+        
+        fields = ", ".join(req.data.keys())
+        placeholders = ", ".join(["%s"] * len(req.data))
+        values = list(req.data.values())
+        
+        query = f"INSERT INTO {req.table} ({fields}) VALUES ({placeholders})"
+        cursor.execute(query, tuple(values))
+        conn.commit()
+        
+        cursor.close()
+        conn.close()
+        return {"success": True, "message": "Row added successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+class DBColumnRequest(BaseModel):
+    table: str
+    column_name: str
+    column_type: str = "VARCHAR(255)"
+    old_name: str = None # For rename
+
+@app.post("/db/add-column")
+async def add_db_column(req: DBColumnRequest):
+    try:
+        conn = mysql.connector.connect(
+            host=os.getenv("DB_HOST", "127.0.0.1"),
+            user=os.getenv("DB_USER", "root"),
+            password="root123",
+            database=os.getenv("DB_NAME", "student_results")
+        )
+        cursor = conn.cursor()
+        query = f"ALTER TABLE {req.table} ADD COLUMN {req.column_name} {req.column_type}"
+        cursor.execute(query)
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return {"success": True, "message": f"Column {req.column_name} added"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/db/rename-column")
+async def rename_db_column(req: DBColumnRequest):
+    try:
+        conn = mysql.connector.connect(
+            host=os.getenv("DB_HOST", "127.0.0.1"),
+            user=os.getenv("DB_USER", "root"),
+            password="root123",
+            database=os.getenv("DB_NAME", "student_results")
+        )
+        cursor = conn.cursor()
+        query = f"ALTER TABLE {req.table} RENAME COLUMN {req.old_name} TO {req.column_name}"
+        cursor.execute(query)
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return {"success": True, "message": f"Column renamed to {req.column_name}"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/db/delete-row")
+async def delete_db_row(req: DBUpdateRequest):
+    try:
+        conn = mysql.connector.connect(
+            host=os.getenv("DB_HOST", "127.0.0.1"),
+            user=os.getenv("DB_USER", "root"),
+            password="root123",
+            database=os.getenv("DB_NAME", "student_results")
+        )
+        cursor = conn.cursor()
+        
+        query = f"DELETE FROM {req.table} WHERE {req.pk_field} = %s"
+        cursor.execute(query, (req.pk_value,))
+        conn.commit()
+        
+        cursor.close()
+        conn.close()
+        return {"success": True, "message": "Row deleted successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 if __name__ == "__main__":
     import uvicorn
     print("[Main] Starting Uvicorn on http://127.0.0.1:8000")
