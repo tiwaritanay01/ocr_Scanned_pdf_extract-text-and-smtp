@@ -8,6 +8,34 @@ from PIL import Image
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 PDF_PATH = "Bachelor of Engineering( Computer Science and Engineering)_Term_1_reval.pdf"
 
+import mysql.connector
+
+def save_student_to_db(ern, seat, status, gpa, semester="sem1"):
+    """Saves or updates extracted student data in the MySQL database using ERN as PK."""
+    try:
+        conn = mysql.connector.connect(
+            host=os.getenv("DB_HOST", "127.0.0.1"),
+            user=os.getenv("DB_USER", "root"),
+            password="root123",
+            database=os.getenv("DB_NAME", "student_results")
+        )
+        cursor = conn.cursor()
+        query = """
+            INSERT INTO fe_be_results (ern, seat_no, status, gpa, semester)
+            VALUES (%s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE 
+            seat_no = VALUES(seat_no),
+            status = VALUES(status),
+            gpa = VALUES(gpa),
+            semester = VALUES(semester)
+        """
+        cursor.execute(query, (ern, seat, status, float(gpa) if gpa else 0.0, semester))
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print(f"[DB ERROR] Could not save {ern}: {e}")
+
 def get_student_blocks(image):
     """Detect student markers and return cropped blocks for each student."""
     data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
@@ -128,8 +156,8 @@ def process_student_block(student_img):
         "GPA": gpa
     }
 
-def process_pdf_to_generator(pdf_path):
-    """Generator that yields results page by page for API streaming."""
+def process_pdf_to_generator(pdf_path, semester="sem1"):
+    """Generator that yields results page by page and saves to DB."""
     images = convert_from_path(pdf_path, dpi=300)
     total_pages = len(images)
     
@@ -139,6 +167,9 @@ def process_pdf_to_generator(pdf_path):
         
         for block in blocks:
             res = process_student_block(block['image'])
+            # Save to Database
+            save_student_to_db(res['ERN'], block['seat'], res['Status'], res['GPA'], semester)
+            
             page_results.append({
                 "name": res['Name'],
                 "ern": res['ERN'],

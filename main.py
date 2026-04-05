@@ -181,6 +181,7 @@ async def send_results(req: MailResultsRequest):
 
 @app.post("/upload-fe-be")
 async def upload_fe_be(file: UploadFile = File(...), user_name: str = "Anonymous", semester: str = "sem1"):
+    """Runs FE_BE.py extraction, saves to DB, returns all results as plain JSON."""
     if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are allowed")
     
@@ -192,20 +193,40 @@ async def upload_fe_be(file: UploadFile = File(...), user_name: str = "Anonymous
         shutil.copyfileobj(file.file, buffer)
     
     from FE_BE import process_pdf_to_generator
-    import json
-    from fastapi.responses import StreamingResponse
+    
+    all_students = []
+    try:
+        for result_page in process_pdf_to_generator(temp_file_path, semester=semester):
+            for s in result_page["students"]:
+                all_students.append(s)
+                print(f"[API] {s['roll']} | {s['ern']} | {s['ocr_result']['status']} | GPA: {s['ocr_result']['gpa']}")
+    finally:
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+    
+    return {"success": True, "count": len(all_students), "students": all_students, "semester": semester}
 
-    def generate_fe_be_results():
-        try:
-            for result_page in process_pdf_to_generator(temp_file_path):
-                # Add target_semester for frontend routing
-                result_page["target_semester"] = semester
-                yield json.dumps(result_page) + "\n"
-        finally:
-            if os.path.exists(temp_file_path):
-                os.remove(temp_file_path)
-
-    return StreamingResponse(generate_fe_be_results(), media_type="application/x-ndjson")
+@app.get("/fe-be-results")
+def get_fe_be_results(semester: str = None):
+    """Read extracted results from the fe_be_results DB table."""
+    try:
+        conn = mysql.connector.connect(
+            host=os.getenv("DB_HOST", "127.0.0.1"),
+            user=os.getenv("DB_USER", "root"),
+            password="root123",
+            database=os.getenv("DB_NAME", "student_results")
+        )
+        cursor = conn.cursor(dictionary=True)
+        if semester:
+            cursor.execute("SELECT ern, seat_no, status, gpa, semester FROM fe_be_results WHERE semester = %s", (semester,))
+        else:
+            cursor.execute("SELECT ern, seat_no, status, gpa, semester FROM fe_be_results")
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return {"success": True, "results": rows}
+    except Exception as e:
+        return {"success": False, "error": str(e), "results": []}
 
 @app.post("/upload-marksheet-stream")
 async def upload_marksheet_stream(file: UploadFile = File(...), user_name: str = "Anonymous", semester: str = "sem3", expected_names: str = Form(None)):
