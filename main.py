@@ -179,6 +179,34 @@ async def send_results(req: MailResultsRequest):
     
     return {"success": True, "sent": success_count, "failed": fail_count}
 
+@app.post("/upload-fe-be")
+async def upload_fe_be(file: UploadFile = File(...), user_name: str = "Anonymous", semester: str = "sem1"):
+    if not file.filename.endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are allowed")
+    
+    add_log(user_name, f"{semester.upper()} Upload", f"Special FE/BE Processing for {file.filename}")
+    file_id = str(uuid.uuid4())
+    temp_file_path = os.path.join(UPLOAD_DIR, f"{file_id}_{file.filename}")
+    
+    with open(temp_file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    
+    from FE_BE import process_pdf_to_generator
+    import json
+    from fastapi.responses import StreamingResponse
+
+    def generate_fe_be_results():
+        try:
+            for result_page in process_pdf_to_generator(temp_file_path):
+                # Add target_semester for frontend routing
+                result_page["target_semester"] = semester
+                yield json.dumps(result_page) + "\n"
+        finally:
+            if os.path.exists(temp_file_path):
+                os.remove(temp_file_path)
+
+    return StreamingResponse(generate_fe_be_results(), media_type="application/x-ndjson")
+
 @app.post("/upload-marksheet-stream")
 async def upload_marksheet_stream(file: UploadFile = File(...), user_name: str = "Anonymous", semester: str = "sem3", expected_names: str = Form(None)):
     if not file.filename.endswith(".pdf"):
