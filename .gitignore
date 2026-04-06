@@ -1,14 +1,37 @@
-*.docx
+# --- Academic Confidential Documents ---
 *.pdf
 *.xlsx
+*.xls
+*.csv
+*.docx
+*.doc
+*.png
+*.jpg
+*.jpeg
+*.jiff
+*.bmp
+
+# --- System & Preprocessing Logs ---
 __pycache__/
 node_modules/
 .env
-debug_*.jpg
-debug_*.txt
-debug_*.png
-temp_*.pdf
-temp_*.xlsx
-raw_ocr_output.txt
-raw_ocr_output_utf8.txt
+.DS_Store
+*.log
+
+# --- Debug & Temporary Storage ---
+debug_*.*
+temp_*.*
+temp_uploads/
+student_pdfs/
+student_png/
+student_text_pdfs/
+raw_ocr_output*.*
 extracted_results.csv
+
+# --- Build & Runtime ---
+dist/
+build/
+.next/
+out/
+.env.local
+.env.*.local
