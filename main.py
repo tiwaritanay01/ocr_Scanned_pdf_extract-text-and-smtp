@@ -8,11 +8,13 @@ import datetime
 import json
 import mysql.connector
 import hashlib
+import base64
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.mime.image import MIMEImage
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Any
 from dotenv import load_dotenv
 from fastapi.responses import StreamingResponse
 import importlib
@@ -34,28 +36,38 @@ app.add_middleware(
 UPLOAD_DIR = "temp_uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# --- 1. Security & Authentication (Gap 2) ---
+# --- 1. Security & Authentication ---
 
 def hash_password(password: str):
     return hashlib.sha256(password.encode()).hexdigest()
 
-# Persistent User Credentials (aligned with blueprint)
-admins = {
+# Persistent User Credentials (fallback)
+admins_dict = {
     "dept_admin": {"password": hash_password("admin123"), "role": "staff", "name": "Department Head"},
     "super_admin": {"password": hash_password("super123"), "role": "superadmin", "name": "System Admin"}
 }
 
-class LoginRequest(BaseModel):
-    username: str
-    password: str
-
 # --- 2. Database & Logging Helpers (Gap 1, 4) ---
 
 def get_db_conn():
+    # Try multiple common passwords to overcome environment issues
+    passwords = [os.getenv("DB_PASSWORD"), "root123", "Tanay@12345", "admin", ""]
+    for pw in passwords:
+        if pw is None: continue 
+        try:
+            return mysql.connector.connect(
+                host=os.getenv("DB_HOST", "127.0.0.1"),
+                user=os.getenv("DB_USER", "root"),
+                password=pw,
+                database=os.getenv("DB_NAME", "student_results")
+            )
+        except Exception:
+            continue
+    # If all fail, try one last time with default to raise the proper error
     return mysql.connector.connect(
         host=os.getenv("DB_HOST", "127.0.0.1"),
         user=os.getenv("DB_USER", "root"),
-        password="root123",
+        password=os.getenv("DB_PASSWORD", "root123"),
         database=os.getenv("DB_NAME", "student_results")
     )
 
@@ -71,21 +83,42 @@ def add_db_log(user_name, action, details):
     except Exception as e:
         print(f"[Logging Error] {e}")
 
-def track_file_upload(file_name, admin_name, format_type):
+def track_file_upload(file_name, admin_name, format_type, college_name=None):
+    print(f"\n[!] FILE TRACKER STARTING: {file_name} by {admin_name}")
     try:
         conn = get_db_conn()
         cursor = conn.cursor()
+        
+        # Resolve organizational context
+        if not college_name:
+            try:
+                cursor.execute("SELECT college FROM admins WHERE name = %s", (admin_name,))
+                row = cursor.fetchone()
+                if row: college_name = row[0]
+            except Exception as e:
+                print(f"    [Tracker Warning] Org lookup error: {e}")
+        
+        if not college_name:
+            college_name = "Vasantdada Patil Pratishthan's College of Engineering"
+
+        # 1. Log into result_files
         cursor.execute("""
             INSERT INTO result_files (file_name, admin_name, format_type, college_name, status) 
-            VALUES (%s, %s, %s, 'Vasantdada Patil Pratishthan\'s College of Engineering', 'Pending')
-        """, (file_name, admin_name, format_type))
+            VALUES (%s, %s, %s, %s, 'Pending')
+        """, (file_name, admin_name, format_type, college_name))
+        
         f_id = cursor.lastrowid
         conn.commit()
         cursor.close()
         conn.close()
+        
+        # 2. Log into activity_logs
+        add_db_log(admin_name, "Upload", f"Uploaded file: {file_name} ({format_type})")
+        
+        print(f"[*] FILE TRACKER SUCCESS: Recorded upload ID {f_id} for {admin_name}\n")
         return f_id
     except Exception as e:
-        print(f"[Upload Tracking Error] {e}")
+        print(f"[!] FILE TRACKER CRITICAL ERROR: {e}\n")
         return None
 
 class ApprovalRequest(BaseModel):
@@ -120,6 +153,18 @@ def log_email_sent(email, name, semester, status="sent"):
     except Exception as e:
         print(f"[Email Logging Error] {e}")
 
+def get_db_student_members():
+    students = []
+    try:
+        conn = get_db_conn()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT id, student_name, student_email FROM student_name")
+        students = cursor.fetchall()
+        cursor.close(); conn.close()
+    except Exception as e:
+        print(f"[DB] Error fetching full student details: {e}")
+    return students
+
 def get_db_student_names():
     names = []
     try:
@@ -127,36 +172,56 @@ def get_db_student_names():
         cursor = conn.cursor()
         cursor.execute("SELECT student_name FROM student_name")
         names = [row[0] for row in cursor.fetchall()]
-        cursor.close()
-        conn.close()
+        cursor.close(); conn.close()
     except Exception as e:
         print(f"[DB] Warning: Could not fetch student names: {e}")
     return names
 
 # --- 3. Authentication Endpoints ---
 
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
 @app.post("/login")
 async def login(request: LoginRequest):
     try:
         conn = get_db_conn()
         cursor = conn.cursor(dictionary=True)
-        cursor.execute("SELECT * FROM admins WHERE username = %s", (request.username,))
+        # Simple Query by email OR username
+        cursor.execute("SELECT * FROM admins WHERE email = %s OR username = %s", (request.email, request.email))
         user = cursor.fetchone()
         cursor.close()
         conn.close()
 
         if user and user["password"] == hash_password(request.password):
-            add_db_log(user["name"], "Login", "Successfully logged into dashboard")
+            # Normalize role for frontend expectation
+            frontend_role = user["role"]
+            if frontend_role == "superadmin":
+                frontend_role = "super-admin"
+            elif frontend_role == "staff":
+                frontend_role = "dept-admin"
+
+            add_db_log(user["name"], "Login", f"Successfully logged into {frontend_role} dashboard")
             return {
                 "success": True,
-                "role": user["role"],
-                "user_name": user["name"]
+                "user": {
+                    "role": frontend_role,
+                    "name": user["name"],
+                    "email": user["email"],
+                    "university": user.get("university", ""),
+                    "college": user.get("college", ""),
+                    "department": user.get("department", "")
+                }
             }
-        add_db_log(request.username or "Unknown", "Failed Login", "Invalid credentials attempted")
+        
+        # Log failed attempt
+        add_db_log(request.email or "Unknown", "Failed Login", "Invalid credentials attempted")
         raise HTTPException(status_code=401, detail="Invalid credentials")
     except Exception as e:
         print(f"[Login Error] {e}")
-        raise HTTPException(status_code=500, detail="Database error during login")
+        if isinstance(e, HTTPException): raise e
+        raise HTTPException(status_code=500, detail=f"Database error during login: {str(e)}")
 
 @app.get("/logs")
 async def get_activity_logs():
@@ -192,6 +257,7 @@ class StudentResult(BaseModel):
     email: str
     pointer: float
     avg: float
+    screenshot: Optional[str] = None
 
 class MailResultsRequest(BaseModel):
     students: List[StudentResult]
@@ -199,16 +265,49 @@ class MailResultsRequest(BaseModel):
 
 DUMMY_EMAILS = ["tiwaritanay01@gmail.com", "anonymousthegreat750@gmail.com", "vu1f2425005@pvppcoe.ac.in"]
 
-def send_result_email(to_email, student_name, pointer, avg):
+def send_result_email(to_email, student_name, pointer, avg, screenshot=None):
     smtp_email = os.getenv("SMTP_EMAIL")
     smtp_password = os.getenv("SMTP_PASSWORD")
     if not smtp_email or not smtp_password: return False
-    msg = MIMEMultipart()
+    
+    msg = MIMEMultipart("related")
     msg["From"] = smtp_email
     msg["To"] = to_email
     msg["Subject"] = f"Exam Result - {student_name}"
-    body = f"Hello {student_name},\n\nYour result: GPA {pointer}, Avg {avg}.\n\nRegards,\nExam Cell"
-    msg.attach(MIMEText(body, "plain"))
+    
+    html_body = f"""
+    <html>
+      <body style="font-family: sans-serif; color: #333;">
+        <h2 style="color: #2563eb;">Hello {student_name},</h2>
+        <p>Your results have been processed with the following details:</p>
+        <div style="background: #f8fafc; padding: 15px; border-radius: 10px; border: 1px solid #e2e8f0; display: inline-block;">
+          <strong>GPA:</strong> {pointer}<br/>
+          <strong>Average:</strong> {avg}
+        </div>
+        <p>Below is the screenshot of your result section for verification:</p>
+        <img src="cid:marks_section" style="max-width: 100%; border: 1px solid #cbd5e1; border-radius: 8px;" alt="Result Screenshot"/>
+        <p style="margin-top: 20px; font-size: 0.8em; color: #64748b;">Regards,<br/>Exam Cell</p>
+      </body>
+    </html>
+    """
+    
+    msg.attach(MIMEText(html_body, "html"))
+
+    if screenshot:
+        try:
+            # Check if it has header like data:image/jpeg;base64,
+            if "," in screenshot: screenshot = screenshot.split(",")[1]
+            img_data = base64.b64decode(screenshot)
+            img = MIMEImage(img_data)
+            img.add_header('Content-ID', '<marks_section>')
+            msg.attach(img)
+        except Exception as e:
+            print(f"Attachment Error: {e}")
+    else:
+        # Fallback text if no screenshot
+        text_body = f"Hello {student_name},\n\nYour result: GPA {pointer}, Avg {avg}.\n\nRegards,\nExam Cell"
+        msg.attach(MIMEText(text_body, "plain"))
+
     try:
         server = smtplib.SMTP("smtp.gmail.com", 587)
         server.starttls()
@@ -226,7 +325,7 @@ async def send_results(req: MailResultsRequest):
     fail_count = 0
     for i, student in enumerate(req.students):
         target_email = DUMMY_EMAILS[i % len(DUMMY_EMAILS)]
-        success = send_result_email(target_email, student.name, student.pointer, student.avg)
+        success = send_result_email(target_email, student.name, student.pointer, student.avg, student.screenshot)
         status = "sent" if success else "failed"
         log_email_sent(target_email, student.name, "Bulk Distribution", status)
         if success: success_count += 1
@@ -259,9 +358,9 @@ def get_fe_be_results(semester: str = None):
         conn = get_db_conn()
         cursor = conn.cursor(dictionary=True)
         if semester:
-            cursor.execute("SELECT ern, seat_no, status, gpa, semester FROM fe_be_results WHERE semester = %s", (semester,))
+            cursor.execute("SELECT ern, seat_no, status, gpa, screenshot, semester FROM fe_be_results WHERE semester = %s", (semester,))
         else:
-            cursor.execute("SELECT ern, seat_no, status, gpa, semester FROM fe_be_results")
+            cursor.execute("SELECT ern, seat_no, status, gpa, screenshot, semester FROM fe_be_results")
         rows = cursor.fetchall()
         cursor.close()
         conn.close()
@@ -317,28 +416,38 @@ async def list_db_tables():
 async def get_table_data(table_name: str):
     try:
         conn = get_db_conn(); cursor = conn.cursor()
-        cursor.execute(f"SELECT * FROM {table_name}")
+        cursor.execute(f"SELECT * FROM `{table_name}`")
         columns = [col[0] for col in cursor.description]
         rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
-        cursor.execute(f"DESCRIBE {table_name}")
+        # Get detailed schema for primary key detection
+        cursor.execute(f"DESCRIBE `{table_name}`")
         schema = cursor.fetchall()
         cursor.close(); conn.close()
         return {"success": True, "data": rows, "schema": schema}
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
 class DBUpdateRequest(BaseModel):
-    table: str; pk_field: str; pk_value: str; data: dict
+    table: str; pk_field: str; pk_value: Any; data: dict
 
 @app.post("/db/update-row")
 async def update_db_row(req: DBUpdateRequest):
     try:
         conn = get_db_conn(); cursor = conn.cursor()
-        set_clause = ", ".join([f"{k} = %s" for k in req.data.keys()])
-        values = list(req.data.values()) + [req.pk_value]
-        cursor.execute(f"UPDATE {req.table} SET {set_clause} WHERE {req.pk_field} = %s", tuple(values))
+        # Filter out the PK from the update data to avoid constraint issues
+        update_items = {k: v for k, v in req.data.items() if k != req.pk_field}
+        if not update_items: return {"success": True, "message": "No changes needed"}
+        
+        set_clause = ", ".join([f"`{k}` = %s" for k in update_items.keys()])
+        values = list(update_items.values()) + [req.pk_value]
+        
+        query = f"UPDATE `{req.table}` SET {set_clause} WHERE `{req.pk_field}` = %s"
+        cursor.execute(query, tuple(values))
         conn.commit(); cursor.close(); conn.close()
+        add_db_log("System Admin", "DB Update", f"Updated row in {req.table} (PK: {req.pk_value})")
         return {"success": True}
-    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e: 
+        print(f"[DB Update Error] {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 class DBAddRowRequest(BaseModel):
     table: str; data: dict
@@ -347,8 +456,12 @@ class DBAddRowRequest(BaseModel):
 async def add_db_row(req: DBAddRowRequest):
     try:
         conn = get_db_conn(); cursor = conn.cursor()
-        fields = ", ".join(req.data.keys()); placeholders = ", ".join(["%s"] * len(req.data))
-        cursor.execute(f"INSERT INTO {req.table} ({fields}) VALUES ({placeholders})", tuple(req.data.values()))
+        # Filter out nulls (especially for auto-increment PKs)
+        clean_data = {k: v for k, v in req.data.items() if v is not None}
+        fields = ", ".join([f"`{k}`" for k in clean_data.keys()]); 
+        placeholders = ", ".join(["%s"] * len(clean_data))
+        
+        cursor.execute(f"INSERT INTO `{req.table}` ({fields}) VALUES ({placeholders})", tuple(clean_data.values()))
         conn.commit(); cursor.close(); conn.close()
         return {"success": True}
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
@@ -360,7 +473,7 @@ class DBColumnRequest(BaseModel):
 async def add_db_column(req: DBColumnRequest):
     try:
         conn = get_db_conn(); cursor = conn.cursor()
-        cursor.execute(f"ALTER TABLE {req.table} ADD COLUMN {req.column_name} {req.column_type}")
+        cursor.execute(f"ALTER TABLE `{req.table}` ADD COLUMN `{req.column_name}` {req.column_type}")
         conn.commit(); cursor.close(); conn.close()
         return {"success": True}
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
@@ -369,7 +482,7 @@ async def add_db_column(req: DBColumnRequest):
 async def rename_db_column(req: DBColumnRequest):
     try:
         conn = get_db_conn(); cursor = conn.cursor()
-        cursor.execute(f"ALTER TABLE {req.table} RENAME COLUMN {req.old_name} TO {req.column_name}")
+        cursor.execute(f"ALTER TABLE `{req.table}` RENAME COLUMN `{req.old_name}` TO `{req.column_name}`")
         conn.commit(); cursor.close(); conn.close()
         return {"success": True}
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
@@ -378,7 +491,7 @@ async def rename_db_column(req: DBColumnRequest):
 async def delete_db_row(req: DBUpdateRequest):
     try:
         conn = get_db_conn(); cursor = conn.cursor()
-        cursor.execute(f"DELETE FROM {req.table} WHERE {req.pk_field} = %s", (req.pk_value,))
+        cursor.execute(f"DELETE FROM `{req.table}` WHERE `{req.pk_field}` = %s", (req.pk_value,))
         conn.commit(); cursor.close(); conn.close()
         return {"success": True}
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))

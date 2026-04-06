@@ -10,7 +10,19 @@ PDF_PATH = "Bachelor of Engineering( Computer Science and Engineering)_Term_1_re
 
 import mysql.connector
 
-def save_student_to_db(ern, seat, status, gpa, semester="sem1"):
+import base64
+import io
+
+def image_to_base64(pil_img):
+    """Convert PIL image to base64 string."""
+    buffered = io.BytesIO()
+    # Resize if too large for DB (optional, but good for performance)
+    if pil_img.width > 2000:
+        pil_img = pil_img.resize((2000, int(pil_img.height * (2000 / pil_img.width))), Image.LANCZOS)
+    pil_img.save(buffered, format="JPEG", quality=85)
+    return base64.b64encode(buffered.getvalue()).decode('utf-8')
+
+def save_student_to_db(ern, seat, status, gpa, semester="sem1", screenshot=None):
     """Saves or updates extracted student data in the MySQL database using ERN as PK."""
     try:
         conn = mysql.connector.connect(
@@ -21,15 +33,16 @@ def save_student_to_db(ern, seat, status, gpa, semester="sem1"):
         )
         cursor = conn.cursor()
         query = """
-            INSERT INTO fe_be_results (ern, seat_no, status, gpa, semester)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO fe_be_results (ern, seat_no, status, gpa, screenshot, semester)
+            VALUES (%s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE 
             seat_no = VALUES(seat_no),
             status = VALUES(status),
             gpa = VALUES(gpa),
+            screenshot = VALUES(screenshot),
             semester = VALUES(semester)
         """
-        cursor.execute(query, (ern, seat, status, float(gpa) if gpa else 0.0, semester))
+        cursor.execute(query, (ern, seat, status, float(gpa) if gpa else 0.0, screenshot, semester))
         conn.commit()
         cursor.close()
         conn.close()
@@ -57,7 +70,6 @@ def get_student_blocks(image):
         curr = markers[i]
         
         # Determine crop boundaries
-        # Use midpoint logic for boundaries
         top_boundary = 0
         if i == 0:
             top_boundary = max(0, curr['y'] - 100)
@@ -68,8 +80,8 @@ def get_student_blocks(image):
         if i < len(markers) - 1:
             bottom_boundary = (curr['y'] + markers[i+1]['y']) // 2
         else:
-            # If it's the last student, look up to 600px down
-            bottom_boundary = min(image.height, curr['y'] + 600)
+            # If it's the last student, look up to 800px down to ensure full section
+            bottom_boundary = min(image.height, curr['y'] + 800)
             
         crop_box = (0, top_boundary, image.width, bottom_boundary)
         student_crop = image.crop(crop_box)
@@ -82,6 +94,9 @@ def get_student_blocks(image):
 
 def process_student_block(student_img):
     """Extract ERN, Name, Status, and GPA from a single student crop."""
+    # Convert image to base64 for DB storage
+    b64_shot = image_to_base64(student_img)
+
     # Use image_to_data to get coordinate-aware text
     data = pytesseract.image_to_data(student_img, output_type=pytesseract.Output.DICT)
     full_text = " ".join(data['text']).strip()
@@ -97,7 +112,6 @@ def process_student_block(student_img):
     name = filtered_names[0] if filtered_names else "UNKNOWN"
     
     # 3. Status and GPA Logic
-    # We look for "PASS" or "FAIL"
     status = "UNKNOWN"
     gpa = "0.0000"
     
@@ -112,7 +126,7 @@ def process_student_block(student_img):
         elif "FAIL" in t:
             fail_idx = i
             status = "FAIL"
-            gpa = "0.0000" # As requested: if FAILED put 0.00000
+            gpa = "0.0000"
 
     # 4. If PASS, extract GPA from vertically below
     if "PASS" in status and pass_idx != -1:
@@ -120,19 +134,13 @@ def process_student_block(student_img):
         pass_left = data['left'][pass_idx]
         pass_height = data['height'][pass_idx]
         
-        # Look for the first float vertically below the 'PASS' word
-        # We search a wider box: 300px horizontally and 200px vertically down
         candidates = []
         for j in range(len(data['text'])):
             text_j = data['text'][j].strip()
-            # Lenient float pattern: 1-2 digits, dot, 2-6 digits
             if re.match(r'^\d{1,2}\.\d{2,6}$', text_j):
-                # Is it below the 'PASS' word?
                 if data['top'][j] >= (pass_top + pass_height):
-                    # Vertical distance should be within ~150px (immediate below)
                     v_dist = data['top'][j] - pass_top
                     if v_dist < 200:
-                        # Horizontal distance: usually centered or slightly offset
                         h_dist = abs(data['left'][j] - pass_left)
                         if h_dist < 300:
                             candidates.append({
@@ -144,7 +152,6 @@ def process_student_block(student_img):
             candidates.sort(key=lambda x: x['dist'])
             gpa = candidates[0]['gpa']
         else:
-            # Broader fallback for this student block
             all_floats = re.findall(r'\d{1,2}\.\d{2,6}', full_text)
             if all_floats:
                 gpa = all_floats[-1]
@@ -153,7 +160,8 @@ def process_student_block(student_img):
         "ERN": ern,
         "Name": name,
         "Status": status,
-        "GPA": gpa
+        "GPA": gpa,
+        "Screenshot": b64_shot
     }
 
 def process_pdf_to_generator(pdf_path, semester="sem1"):
@@ -167,8 +175,8 @@ def process_pdf_to_generator(pdf_path, semester="sem1"):
         
         for block in blocks:
             res = process_student_block(block['image'])
-            # Save to Database
-            save_student_to_db(res['ERN'], block['seat'], res['Status'], res['GPA'], semester)
+            # Save to Database with screenshot
+            save_student_to_db(res['ERN'], block['seat'], res['Status'], res['GPA'], semester, res['Screenshot'])
             
             page_results.append({
                 "name": res['Name'],
@@ -177,7 +185,8 @@ def process_pdf_to_generator(pdf_path, semester="sem1"):
                 "ocr_result": {
                     "gpa": float(res['GPA']) if res['GPA'] else 0.0,
                     "status": res['Status'],
-                    "ern": res['ERN']
+                    "ern": res['ERN'],
+                    "screenshot": res['Screenshot']
                 }
             })
             
