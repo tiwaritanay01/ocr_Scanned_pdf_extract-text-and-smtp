@@ -9,6 +9,7 @@ import json
 import mysql.connector
 import hashlib
 import base64
+import io
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -258,6 +259,7 @@ class StudentResult(BaseModel):
     pointer: float
     avg: float
     screenshot: Optional[str] = None
+    subject_marks: Optional[dict] = None
 
 class MailResultsRequest(BaseModel):
     students: List[StudentResult]
@@ -265,7 +267,7 @@ class MailResultsRequest(BaseModel):
 
 DUMMY_EMAILS = ["tiwaritanay01@gmail.com", "anonymousthegreat750@gmail.com", "vu1f2425005@pvppcoe.ac.in"]
 
-def send_result_email(to_email, student_name, pointer, avg, screenshot=None):
+def send_result_email(to_email, student_name, pointer, avg, screenshot=None, subject_marks=None):
     smtp_email = os.getenv("SMTP_EMAIL")
     smtp_password = os.getenv("SMTP_PASSWORD")
     if not smtp_email or not smtp_password: return False
@@ -280,13 +282,48 @@ def send_result_email(to_email, student_name, pointer, avg, screenshot=None):
       <body style="font-family: sans-serif; color: #333;">
         <h2 style="color: #2563eb;">Hello {student_name},</h2>
         <p>Your results have been processed with the following details:</p>
-        <div style="background: #f8fafc; padding: 15px; border-radius: 10px; border: 1px solid #e2e8f0; display: inline-block;">
+        <div style="background: #f8fafc; padding: 15px; border-radius: 10px; border: 1px solid #e2e8f0; display: inline-block; margin-bottom: 20px;">
           <strong>GPA:</strong> {pointer}<br/>
           <strong>Average:</strong> {avg}
         </div>
-        <p>Below is the screenshot of your result section for verification:</p>
-        <img src="cid:marks_section" style="max-width: 100%; border: 1px solid #cbd5e1; border-radius: 8px;" alt="Result Screenshot"/>
-        <p style="margin-top: 20px; font-size: 0.8em; color: #64748b;">Regards,<br/>Exam Cell</p>
+    """
+
+    if subject_marks:
+        html_body += """
+        <div style="margin-top: 10px; margin-bottom: 20px;">
+            <p style="font-weight: bold;">Subject-wise Breakdown:</p>
+            <table style="border-collapse: collapse; width: 100%; max-width: 400px; border: 1px solid #e2e8f0;">
+                <thead style="background: #f1f5f9;">
+                    <tr>
+                        <th style="padding: 10px; text-align: left; border: 1px solid #e2e8f0;">Subject Code</th>
+                        <th style="padding: 10px; text-align: left; border: 1px solid #e2e8f0;">Marks</th>
+                    </tr>
+                </thead>
+                <tbody>
+        """
+        for code, mark in subject_marks.items():
+            html_body += f"""
+                    <tr>
+                        <td style="padding: 10px; border: 1px solid #e2e8f0;">{code}</td>
+                        <td style="padding: 10px; border: 1px solid #e2e8f0;">{mark}</td>
+                    </tr>
+            """
+        html_body += """
+                </tbody>
+            </table>
+        </div>
+        """
+
+    if screenshot:
+        html_body += f"""
+        <div style="margin-top: 20px;">
+            <p style="font-weight: bold;">Result Snippet Verification:</p>
+            <img src="cid:marks_section" style="max-width: 100%; border: 1px solid #cbd5e1; border-radius: 8px;" alt="Result Screenshot"/>
+        </div>
+        """
+
+    html_body += f"""
+        <p style="margin-top: 30px; font-size: 0.8em; color: #64748b;">Regards,<br/>Exam Cell</p>
       </body>
     </html>
     """
@@ -295,7 +332,6 @@ def send_result_email(to_email, student_name, pointer, avg, screenshot=None):
 
     if screenshot:
         try:
-            # Check if it has header like data:image/jpeg;base64,
             if "," in screenshot: screenshot = screenshot.split(",")[1]
             img_data = base64.b64decode(screenshot)
             img = MIMEImage(img_data)
@@ -303,10 +339,6 @@ def send_result_email(to_email, student_name, pointer, avg, screenshot=None):
             msg.attach(img)
         except Exception as e:
             print(f"Attachment Error: {e}")
-    else:
-        # Fallback text if no screenshot
-        text_body = f"Hello {student_name},\n\nYour result: GPA {pointer}, Avg {avg}.\n\nRegards,\nExam Cell"
-        msg.attach(MIMEText(text_body, "plain"))
 
     try:
         server = smtplib.SMTP("smtp.gmail.com", 587)
@@ -325,7 +357,14 @@ async def send_results(req: MailResultsRequest):
     fail_count = 0
     for i, student in enumerate(req.students):
         target_email = DUMMY_EMAILS[i % len(DUMMY_EMAILS)]
-        success = send_result_email(target_email, student.name, student.pointer, student.avg, student.screenshot)
+        success = send_result_email(
+            target_email, 
+            student.name, 
+            student.pointer, 
+            student.avg, 
+            student.screenshot,
+            student.subject_marks
+        )
         status = "sent" if success else "failed"
         log_email_sent(target_email, student.name, "Bulk Distribution", status)
         if success: success_count += 1
@@ -400,7 +439,102 @@ async def upload_marksheet_stream(file: UploadFile = File(...), user_name: str =
 
     return StreamingResponse(generate_results(), media_type="application/x-ndjson")
 
-# --- 6. Database Explorer Endpoints ---
+@app.post("/upload-excel")
+async def upload_excel(file: UploadFile = File(...), user_name: str = "Anonymous", semester: str = "sem1"):
+    if not (file.filename.endswith(".xlsx") or file.filename.endswith(".xls")):
+        raise HTTPException(status_code=400, detail="Only Excel files allowed")
+    
+    f_id = track_file_upload(file.filename, user_name, "Excel")
+    add_db_log(user_name, "Excel Upload", f"Processing {file.filename} for {semester}")
+    
+    try:
+        import pandas as pd
+        contents = await file.read()
+        df = pd.read_excel(io.BytesIO(contents))
+        
+        # Standardize column names for matching
+        original_cols = list(df.columns)
+        upper_cols = [str(c).strip().upper() for c in original_cols]
+        df.columns = upper_cols
+        
+        # REQUIRED Keywords: Name, GPA, Status
+        name_col = next((c for i, c in enumerate(upper_cols) if "NAME" in c), None)
+        gpa_col = next((c for i, c in enumerate(upper_cols) if any(x in c for x in ["GPA", "POINTER", "SGPI", "RESULT", "TOTAL", "AVERAGE"])), None)
+        status_col = next((c for i, c in enumerate(upper_cols) if any(x in c for x in ["STATUS", "RESULT_STATUS", "OUTCOME"])), None)
+        # If no status col found, but we find GPA, we can infer it
+        ern_col = next((c for i, c in enumerate(upper_cols) if any(x in c for x in ["ERN", "SEAT", "ROLL", "ID", "PRN", "SR_NO"])), None)
+        
+        if not name_col:
+            raise HTTPException(status_code=400, detail="Could not find NAME column. Available columns: " + ", ".join(original_cols))
+        
+        results = []
+        conn = get_db_conn()
+        cursor = conn.cursor()
+        
+        for _, row in df.iterrows():
+            s_name = str(row[name_col])
+            s_gpa = float(row[gpa_col]) if gpa_col and not pd.isna(row[gpa_col]) else 0.0
+            
+            # Infer status if not explicit
+            if status_col and not pd.isna(row[status_col]):
+                s_status = str(row[status_col]).upper()
+            else:
+                s_status = "PASS" if s_gpa >= 4.0 else "FAIL" # Default fallback logic
+                
+            s_ern = str(row[ern_col]) if ern_col and not pd.isna(row[ern_col]) else "N/A"
+            
+            # Sub-marks: All other columns that aren't the primary ones
+            subject_marks = {}
+            reserved = [name_col, gpa_col, status_col, ern_col]
+            for col in upper_cols:
+                if col not in reserved:
+                    val = row[col]
+                    if not pd.isna(val):
+                        # Use the original column name for subject display
+                        orig_idx = upper_cols.index(col)
+                        orig_name = original_cols[orig_idx]
+                        subject_marks[orig_name] = str(val)
+            
+            # Save detailed results to DB
+            cursor.execute("""
+                INSERT INTO detailed_results (ern, student_name, semester, subject_marks)
+                VALUES (%s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE 
+                subject_marks = VALUES(subject_marks)
+            """, (s_ern, s_name, semester, json.dumps(subject_marks)))
+            
+            # Sync to main summary table
+            # fe_be_results is for dashboard summary
+            cursor.execute("""
+                INSERT INTO fe_be_results (ern, seat_no, status, gpa, semester)
+                VALUES (%s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE 
+                status = VALUES(status),
+                gpa = VALUES(gpa)
+            """, (s_ern, s_ern, s_status, s_gpa, semester))
+            
+            results.append({
+                "name": s_name,
+                "ern": s_ern,
+                "roll": s_ern,
+                "ocr_result": {
+                    "gpa": s_gpa,
+                    "status": s_status,
+                    "subjectMarks": subject_marks
+                }
+            })
+            
+        conn.commit()
+        cursor.close()
+        conn.close()
+        
+        return {"success": True, "count": len(results), "students": results, "semester": semester, "file_id": f_id}
+        
+    except Exception as e:
+        print(f"Excel Error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/db/tables")
 async def list_db_tables():
