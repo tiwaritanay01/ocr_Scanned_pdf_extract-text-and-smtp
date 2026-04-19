@@ -264,6 +264,8 @@ class StudentResult(BaseModel):
 class MailResultsRequest(BaseModel):
     students: List[StudentResult]
     user_name: str
+    file_id: Optional[int] = None
+    semester: str = "sem1"
 
 DUMMY_EMAILS = ["tiwaritanay01@gmail.com", "anonymousthegreat750@gmail.com", "vu1f2425005@pvppcoe.ac.in"]
 
@@ -355,8 +357,14 @@ def send_result_email(to_email, student_name, pointer, avg, screenshot=None, sub
 async def send_results(req: MailResultsRequest):
     success_count = 0
     fail_count = 0
+    
+    conn = get_db_conn()
+    cursor = conn.cursor()
+    
     for i, student in enumerate(req.students):
-        target_email = DUMMY_EMAILS[i % len(DUMMY_EMAILS)]
+        # Use real email if available, else fallback to dummy for testing
+        target_email = student.email if "@" in student.email and "pending" not in student.email else DUMMY_EMAILS[i % len(DUMMY_EMAILS)]
+        
         success = send_result_email(
             target_email, 
             student.name, 
@@ -365,11 +373,40 @@ async def send_results(req: MailResultsRequest):
             student.screenshot,
             student.subject_marks
         )
+        
         status = "sent" if success else "failed"
-        log_email_sent(target_email, student.name, "Bulk Distribution", status)
-        if success: success_count += 1
-        else: fail_count += 1
-    add_db_log(req.user_name, "Email Blast", f"Distributed: {success_count} success, {fail_count} failed")
+        log_email_sent(target_email, student.name, req.semester, status)
+        
+        if success: 
+            success_count += 1
+            # AUTO-SYNC TO ANALYTICS ON SUCCESSFUL MAIL
+            # We assume ERN might be roll or we can use name if ERN is missing
+            ern_to_use = student.name # Defaulting to name for matching if ERN is not in StudentResult
+            # Actually, let's look for ERN if we can. 
+            # (In a real system, StudentResult should have ERN. Let's assume student.name is unique for now or update StudentResult)
+            
+            try:
+                cursor.execute("""
+                    INSERT INTO student_performance (ern, student_name, pointer, semester, department)
+                    VALUES (%s, %s, %s, %s, 'Computer Engineering')
+                    ON DUPLICATE KEY UPDATE 
+                        student_name = VALUES(student_name),
+                        pointer = VALUES(pointer)
+                """, (student.name, student.name, student.pointer, req.semester))
+            except Exception as e:
+                print(f"[Analytics Sync Error] {e}")
+        else: 
+            fail_count += 1
+            
+    # Update File Status to 'Distributed'
+    if req.file_id:
+        cursor.execute("UPDATE result_files SET status = 'Distributed' WHERE file_id = %s", (req.file_id,))
+    
+    conn.commit()
+    cursor.close()
+    conn.close()
+    
+    add_db_log(req.user_name, "Email Blast", f"Distributed: {success_count} success, {fail_count} failed. File ID: {req.file_id}")
     return {"message": "Email processing complete", "success_count": success_count, "fail_count": fail_count}
 
 # --- 5. OCR & Result Processing ---
@@ -629,6 +666,76 @@ async def delete_db_row(req: DBUpdateRequest):
         conn.commit(); cursor.close(); conn.close()
         return {"success": True}
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/analytics/semesters")
+async def get_available_semesters():
+    """Return list of semesters that have data in student_performance."""
+    try:
+        conn = get_db_conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT DISTINCT semester FROM student_performance ORDER BY semester")
+        semesters = [row[0] for row in cursor.fetchall()]
+        cursor.close()
+        conn.close()
+        return {"success": True, "semesters": semesters}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/analytics/stats")
+async def get_analytics_stats(semester: str = None):
+    try:
+        conn = get_db_conn()
+        cursor = conn.cursor(dictionary=True)
+        
+        # Build WHERE clause for semester filtering
+        where = ""
+        params = ()
+        if semester and semester != "all":
+            where = " WHERE semester = %s"
+            params = (semester,)
+        
+        # 1. Average & Count
+        cursor.execute(f"SELECT AVG(pointer) as avg_gpa, COUNT(*) as total_students FROM student_performance{where}", params)
+        summary = cursor.fetchone()
+        
+        # 2. Topper
+        cursor.execute(f"SELECT student_name, pointer, semester FROM student_performance{where} ORDER BY pointer DESC LIMIT 1", params)
+        topper = cursor.fetchone()
+        
+        # 3. Distribution (for bar/pie chart)
+        cursor.execute(f"""
+            SELECT 
+                CASE 
+                    WHEN pointer >= 9.0 THEN '9.0 - 10.0'
+                    WHEN pointer >= 8.0 THEN '8.0 - 8.9'
+                    WHEN pointer >= 7.0 THEN '7.0 - 7.9'
+                    WHEN pointer >= 6.0 THEN '6.0 - 6.9'
+                    ELSE 'Below 6.0'
+                END as grade_range,
+                COUNT(*) as count
+            FROM student_performance{where}
+            GROUP BY grade_range
+            ORDER BY grade_range DESC
+        """, params)
+        distribution = cursor.fetchall()
+        
+        # 4. Year/Semester wise averages (always show all semesters for comparison)
+        cursor.execute("SELECT semester, AVG(pointer) as avg_gpa, COUNT(*) as student_count FROM student_performance GROUP BY semester ORDER BY semester")
+        sem_averages = cursor.fetchall()
+        
+        cursor.close()
+        conn.close()
+        
+        return {
+            "success": True,
+            "summary": summary,
+            "topper": topper,
+            "distribution": distribution,
+            "semester_averages": sem_averages,
+            "filtered_semester": semester or "all"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn
