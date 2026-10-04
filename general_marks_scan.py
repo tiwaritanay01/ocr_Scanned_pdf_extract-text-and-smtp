@@ -26,6 +26,17 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Ensure Poppler is in PATH
+POPPLER_DIRS = [
+    r"C:\Program Files\poppler-25.12.0\Library\bin",
+    r"C:\Program Files\poppler\Library\bin",
+    r"C:\poppler\Library\bin",
+    r"C:\poppler\bin",
+]
+for p in POPPLER_DIRS:
+    if os.path.exists(p) and p not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = p + os.pathsep + os.environ.get("PATH", "")
+
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 # ─────────────────────────────────────────────────────────────
