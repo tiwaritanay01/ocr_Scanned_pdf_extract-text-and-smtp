@@ -281,9 +281,14 @@ export default function SuperAdminDashboard() {
 }
 
 function DeptAdminsTable({ admins, onDelete, onAdd, searchQuery, setSearchQuery, students }) {
-    // Calculate Dynamic OCR Accuracy
+    // Calculate Dynamic OCR Accuracy across all cohorts
     // If a student's mark field gpa != ocrValue, it counts as a manual correction
-    const allStudents = [...(students?.SE || []), ...(students?.TE || [])];
+    const allStudents = [
+        ...(students?.FE || []),
+        ...(students?.SE || []),
+        ...(students?.TE || []),
+        ...(students?.BE || [])
+    ];
     let totalFields = 0;
     let manualCorrections = 0;
 
