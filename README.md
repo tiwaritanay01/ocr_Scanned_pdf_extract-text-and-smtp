@@ -106,21 +106,5 @@ The system maintains strict relational integrity across 8 tables:
 
 ---
 
-## ☁️ Free Cloud Deployment Quickstart
 
-### 1. Database (TiDB Cloud Serverless)
-- Create a free cluster on [TiDB Cloud](https://tidbcloud.com) ($0/month, 5 GB free forever).
-- In the SQL Editor, execute `schema.sql` to initialize tables and default credentials.
-
-### 2. Backend (Render / Hugging Face Spaces with Docker)
-- Deploy as a **Web Service (Docker)** on [Render](https://render.com) using the included `Dockerfile`.
-- Set Environment Variables: `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `SMTP_EMAIL`, `SMTP_PASSWORD`.
-- Check health at `https://<your-service>.onrender.com/health`.
-
-### 3. Frontend (Vercel)
-- Deploy `mail_frontend/frontend_mini_pro` on [Vercel](https://vercel.com).
-- Add Environment Variable: `VITE_API_BASE_URL=https://<your-service>.onrender.com`.
-
----
-*Created with ❤️ for Academic Excellence.*
 
