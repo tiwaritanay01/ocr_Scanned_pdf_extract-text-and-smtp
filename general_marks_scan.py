@@ -26,22 +26,41 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Ensure Poppler is in PATH
+# Ensure Poppler is in PATH (Cross-platform)
 POPPLER_DIRS = [
+    os.getenv("POPPLER_PATH"),
     r"C:\Program Files\poppler-25.12.0\Library\bin",
     r"C:\Program Files\poppler\Library\bin",
     r"C:\poppler\Library\bin",
     r"C:\poppler\bin",
 ]
 for p in POPPLER_DIRS:
-    if os.path.exists(p) and p not in os.environ.get("PATH", ""):
+    if p and os.path.exists(p) and p not in os.environ.get("PATH", ""):
         os.environ["PATH"] = p + os.pathsep + os.environ.get("PATH", "")
 
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+# Configure Tesseract path (Windows fallback / Linux native)
+tesseract_bin = os.getenv("TESSERACT_CMD")
+if tesseract_bin and os.path.exists(tesseract_bin):
+    pytesseract.pytesseract.tesseract_cmd = tesseract_bin
+elif os.path.exists(r"C:\Program Files\Tesseract-OCR\tesseract.exe"):
+    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 # ─────────────────────────────────────────────────────────────
 # DB: Load ground-truth student names (Primary Truth Source)
 # ─────────────────────────────────────────────────────────────
+
+def get_scan_db_conn():
+    try:
+        from main import get_db_conn
+        return get_db_conn()
+    except Exception:
+        return mysql.connector.connect(
+            host=os.getenv("DB_HOST", "127.0.0.1"),
+            user=os.getenv("DB_USER", "root"),
+            password=os.getenv("DB_PASSWORD", "root123"),
+            database=os.getenv("DB_NAME", "student_results"),
+            port=int(os.getenv("DB_PORT", "3306"))
+        )
 
 def load_known_names():
     known = set()
@@ -59,12 +78,7 @@ def load_known_names():
 
     # 2. MySQL student_name table (Primary Source)
     try:
-        conn = mysql.connector.connect(
-            host=os.getenv("DB_HOST", "127.0.0.1"),
-            user=os.getenv("DB_USER", "root"),
-            password="root123",
-            database=os.getenv("DB_NAME", "student_results"),
-        )
+        conn = get_scan_db_conn()
         cur = conn.cursor()
         cur.execute("SELECT student_name FROM student_name")
         for (name,) in cur.fetchall():

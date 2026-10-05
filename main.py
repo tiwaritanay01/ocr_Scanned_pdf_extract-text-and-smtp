@@ -20,26 +20,38 @@ from dotenv import load_dotenv
 from fastapi.responses import StreamingResponse
 import importlib
 
+from urllib.parse import urlparse
+import pytesseract
+
 # Load environment variables
 load_dotenv()
 
-# Ensure Poppler is in PATH
+# Ensure Poppler is in PATH (Cross-platform)
 POPPLER_DIRS = [
+    os.getenv("POPPLER_PATH"),
     r"C:\Program Files\poppler-25.12.0\Library\bin",
     r"C:\Program Files\poppler\Library\bin",
     r"C:\poppler\Library\bin",
     r"C:\poppler\bin",
 ]
 for p in POPPLER_DIRS:
-    if os.path.exists(p) and p not in os.environ.get("PATH", ""):
+    if p and os.path.exists(p) and p not in os.environ.get("PATH", ""):
         os.environ["PATH"] = p + os.pathsep + os.environ.get("PATH", "")
 
-app = FastAPI()
+# Configure Tesseract path (Windows fallback / Linux native)
+tesseract_bin = os.getenv("TESSERACT_CMD")
+if tesseract_bin and os.path.exists(tesseract_bin):
+    pytesseract.pytesseract.tesseract_cmd = tesseract_bin
+elif os.path.exists(r"C:\Program Files\Tesseract-OCR\tesseract.exe"):
+    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+
+app = FastAPI(title="Online Result Processing & Distribution System")
 
 # Enable CORS for frontend
+cors_origins = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "*").split(",") if origin.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins if cors_origins != ["*"] else ["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -47,6 +59,15 @@ app.add_middleware(
 
 UPLOAD_DIR = "temp_uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+# --- Health check endpoints for cloud monitoring ---
+@app.get("/")
+def root():
+    return {"status": "ok", "service": "Automated Result Processing API"}
+
+@app.get("/health")
+def health():
+    return {"status": "healthy"}
 
 # --- 1. Security & Authentication ---
 
@@ -59,29 +80,175 @@ admins_dict = {
     "super_admin": {"password": hash_password("super123"), "role": "superadmin", "name": "System Admin"}
 }
 
-# --- 2. Database & Logging Helpers (Gap 1, 4) ---
+# --- 2. Database & Logging Helpers ---
 
 def get_db_conn():
-    # Try multiple common passwords to overcome environment issues
-    passwords = [os.getenv("DB_PASSWORD"), "root123", "Tanay@12345", "admin", ""]
+    """Robust DB connection supporting cloud URLs, custom ports, and SSL."""
+    db_url = os.getenv("DATABASE_URL")
+    if db_url and (db_url.startswith("mysql://") or db_url.startswith("mysql+mysqlconnector://")):
+        # Strip scheme for urlparse if needed
+        clean_url = db_url.replace("mysql+mysqlconnector://", "mysql://")
+        parsed = urlparse(clean_url)
+        return mysql.connector.connect(
+            host=parsed.hostname,
+            user=parsed.username,
+            password=parsed.password,
+            database=parsed.path.lstrip("/"),
+            port=parsed.port or 3306
+        )
+
+    host = os.getenv("DB_HOST", "127.0.0.1")
+    user = os.getenv("DB_USER", "root")
+    dbname = os.getenv("DB_NAME", "student_results")
+    port = int(os.getenv("DB_PORT", "3306"))
+    primary_pw = os.getenv("DB_PASSWORD")
+
+    # Try configured password first, then common local fallbacks
+    passwords = [primary_pw, "root123", "Tanay@12345", "admin", ""]
+    last_err = None
     for pw in passwords:
-        if pw is None: continue 
-        try:
-            return mysql.connector.connect(
-                host=os.getenv("DB_HOST", "127.0.0.1"),
-                user=os.getenv("DB_USER", "root"),
-                password=pw,
-                database=os.getenv("DB_NAME", "student_results")
-            )
-        except Exception:
+        if pw is None:
             continue
-    # If all fail, try one last time with default to raise the proper error
-    return mysql.connector.connect(
-        host=os.getenv("DB_HOST", "127.0.0.1"),
-        user=os.getenv("DB_USER", "root"),
-        password=os.getenv("DB_PASSWORD", "root123"),
-        database=os.getenv("DB_NAME", "student_results")
-    )
+        try:
+            conn_args = {
+                "host": host,
+                "user": user,
+                "password": pw,
+                "database": dbname,
+                "port": port
+            }
+            ssl_ca = os.getenv("DB_SSL_CA")
+            if ssl_ca and os.path.exists(ssl_ca):
+                conn_args["ssl_ca"] = ssl_ca
+            return mysql.connector.connect(**conn_args)
+        except Exception as e:
+            last_err = e
+            continue
+
+    if last_err:
+        raise last_err
+    raise Exception("Could not connect to MySQL database")
+
+def init_db_tables():
+    """Ensure all required tables and default users exist on startup."""
+    try:
+        conn = get_db_conn()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS admins (
+                admin_id INT AUTO_INCREMENT PRIMARY KEY,
+                username VARCHAR(50) NOT NULL UNIQUE,
+                password VARCHAR(255) NOT NULL,
+                name VARCHAR(100) NOT NULL,
+                email VARCHAR(100) NOT NULL,
+                department VARCHAR(255) NULL,
+                college VARCHAR(255) NULL,
+                university VARCHAR(255) NULL,
+                role VARCHAR(50) NOT NULL,
+                status VARCHAR(20) DEFAULT 'active'
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS activity_logs (
+                log_id INT AUTO_INCREMENT PRIMARY KEY,
+                user_name VARCHAR(100),
+                action_type VARCHAR(50),
+                details TEXT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS result_files (
+                file_id INT AUTO_INCREMENT PRIMARY KEY,
+                file_name VARCHAR(255) NOT NULL,
+                upload_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                format_type VARCHAR(50) DEFAULT 'PDF',
+                status VARCHAR(20) DEFAULT 'pending',
+                admin_name VARCHAR(100),
+                college_name VARCHAR(150)
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS email_logs (
+                mail_id INT AUTO_INCREMENT PRIMARY KEY,
+                student_email VARCHAR(150) NOT NULL,
+                student_name VARCHAR(150),
+                sent_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                status VARCHAR(20) DEFAULT 'sent',
+                subject_semester VARCHAR(50)
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS student_name (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                ern VARCHAR(50),
+                student_name VARCHAR(255) UNIQUE,
+                student_email VARCHAR(255)
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS detailed_results (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                ern VARCHAR(255),
+                student_name VARCHAR(255),
+                semester VARCHAR(50),
+                subject_marks JSON,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY unique_student_sem (ern, student_name, semester)
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS fe_be_results (
+                ern VARCHAR(255) NOT NULL PRIMARY KEY,
+                seat_no VARCHAR(50),
+                status VARCHAR(10),
+                gpa FLOAT,
+                screenshot LONGTEXT,
+                semester VARCHAR(20)
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS student_performance (
+                performance_id INT AUTO_INCREMENT PRIMARY KEY,
+                ern VARCHAR(50),
+                student_name VARCHAR(255),
+                pointer DECIMAL(4,2),
+                semester VARCHAR(20),
+                department VARCHAR(100),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY student_sem (ern, semester)
+            )
+        """)
+
+        # Seed initial admins if empty
+        cursor.execute("SELECT COUNT(*) FROM admins")
+        if cursor.fetchone()[0] == 0:
+            cursor.execute("""
+                INSERT INTO admins (username, password, name, email, department, college, university, role)
+                VALUES 
+                ('dept_admin', %s, 'Department Head', 'dept@college.edu', 'Computer Engineering', 'Vasantdada Patil Pratishthan College of Engineering', 'University of Mumbai', 'staff'),
+                ('super_admin', %s, 'System Admin', 'admin@system.com', 'Administration', 'Vasantdada Patil Pratishthan College of Engineering', 'University of Mumbai', 'superadmin')
+            """, (hash_password("admin123"), hash_password("super123")))
+            print("[Init DB] Seeded default admin credentials.")
+
+        conn.commit()
+        cursor.close()
+        conn.close()
+        print("[Init DB] Database schema verified.")
+    except Exception as e:
+        print(f"[Init DB Warning] Auto-init skipped or failed: {e}")
+
+@app.on_event("startup")
+def on_app_startup():
+    init_db_tables()
 
 def add_db_log(user_name, action, details):
     try:
@@ -750,5 +917,7 @@ async def get_analytics_stats(semester: str = None):
 
 if __name__ == "__main__":
     import uvicorn
-    print("[Main] Starting Uvicorn on http://127.0.0.1:8000")
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", 8000))
+    print(f"[Main] Starting Uvicorn on http://{host}:{port}")
+    uvicorn.run(app, host=host, port=port)

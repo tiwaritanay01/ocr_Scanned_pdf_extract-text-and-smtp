@@ -4,14 +4,44 @@ import pytesseract
 from pdf2image import convert_from_path
 from PIL import Image
 
+# Ensure Poppler is in PATH (Cross-platform)
+POPPLER_DIRS = [
+    os.getenv("POPPLER_PATH"),
+    r"C:\Program Files\poppler-25.12.0\Library\bin",
+    r"C:\Program Files\poppler\Library\bin",
+    r"C:\poppler\Library\bin",
+    r"C:\poppler\bin",
+]
+for p in POPPLER_DIRS:
+    if p and os.path.exists(p) and p not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = p + os.pathsep + os.environ.get("PATH", "")
+
 # Configuration
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+tesseract_cmd = os.getenv("TESSERACT_CMD")
+if tesseract_cmd and os.path.exists(tesseract_cmd):
+    pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
+elif os.path.exists(r"C:\Program Files\Tesseract-OCR\tesseract.exe"):
+    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+
 PDF_PATH = "Bachelor of Engineering( Computer Science and Engineering)_Term_1_reval.pdf"
 
 import mysql.connector
 
 import base64
 import io
+
+def get_fe_be_db_conn():
+    try:
+        from main import get_db_conn
+        return get_db_conn()
+    except Exception:
+        return mysql.connector.connect(
+            host=os.getenv("DB_HOST", "127.0.0.1"),
+            user=os.getenv("DB_USER", "root"),
+            password=os.getenv("DB_PASSWORD", "root123"),
+            database=os.getenv("DB_NAME", "student_results"),
+            port=int(os.getenv("DB_PORT", "3306"))
+        )
 
 def image_to_base64(pil_img):
     """Convert PIL image to base64 string."""
@@ -25,12 +55,7 @@ def image_to_base64(pil_img):
 def save_student_to_db(ern, seat, status, gpa, semester="sem1", screenshot=None):
     """Saves or updates extracted student data in the MySQL database using ERN as PK."""
     try:
-        conn = mysql.connector.connect(
-            host=os.getenv("DB_HOST", "127.0.0.1"),
-            user=os.getenv("DB_USER", "root"),
-            password="root123",
-            database=os.getenv("DB_NAME", "student_results")
-        )
+        conn = get_fe_be_db_conn()
         cursor = conn.cursor()
         query = """
             INSERT INTO fe_be_results (ern, seat_no, status, gpa, screenshot, semester)

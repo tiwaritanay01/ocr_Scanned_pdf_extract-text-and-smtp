@@ -1,0 +1,16 @@
+# Backend Requirements for Online Result Processing & Distribution System
+fastapi>=0.110.0
+uvicorn[standard]>=0.28.0
+pydantic>=2.6.0
+python-multipart>=0.0.9
+python-dotenv>=1.0.1
+mysql-connector-python>=9.0.0
+pandas>=2.2.0
+openpyxl>=3.1.2
+pytesseract>=0.3.10
+pdf2image>=1.17.0
+opencv-python-headless>=4.9.0.80
+pillow>=10.2.0
+pymupdf>=1.24.0
+python-docx>=1.1.0
+numpy>=1.26.0
