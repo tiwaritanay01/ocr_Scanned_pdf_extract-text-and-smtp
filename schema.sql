@@ -94,12 +94,12 @@ CREATE TABLE IF NOT EXISTS student_performance (
 -- ========================================================
 -- Seed Default Admins
 -- dept_admin   / admin123  (SHA-256: 240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9)
--- super_admin  / super123  (SHA-256: 4fca4b4cb7df473d09a0f02377a0302fa9ee24db8969b76e27606e921d7b309f)
+-- super_admin  / super123  (SHA-256: 4e4c56e4a15f89f05c2f4c72613da2a18c9665d4f0d6acce16415eb06f9be776)
 -- ========================================================
 INSERT IGNORE INTO admins (admin_id, username, password, name, email, department, college, university, role, status)
 VALUES 
 (1, 'dept_admin', '240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9', 'Department Head', 'dept@college.edu', 'Computer Engineering', 'Vasantdada Patil Pratishthan\'s College of Engineering', 'University of Mumbai', 'staff', 'active'),
-(2, 'super_admin', '4fca4b4cb7df473d09a0f02377a0302fa9ee24db8969b76e27606e921d7b309f', 'System Admin', 'admin@system.com', 'Central Admin', 'Vasantdada Patil Pratishthan\'s College of Engineering', 'University of Mumbai', 'superadmin', 'active');
+(2, 'super_admin', '4e4c56e4a15f89f05c2f4c72613da2a18c9665d4f0d6acce16415eb06f9be776', 'System Admin', 'admin@system.com', 'Central Admin', 'Vasantdada Patil Pratishthan\'s College of Engineering', 'University of Mumbai', 'superadmin', 'active');
 
 
 -- ========================================================
