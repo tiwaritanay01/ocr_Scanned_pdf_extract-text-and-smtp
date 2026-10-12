@@ -3,7 +3,7 @@ import { useTheme } from '../context/ThemeContext';
 import {
     Search, Upload, FileDown, Save, ChevronLeft, LayoutGrid, Eye,
     List, GraduationCap, Filter, MoreHorizontal, ArrowLeft, Users, Activity, Plus, Trash2, Send, Shield, X, Info,
-    Edit3, Undo2, CheckCircle2, AlertTriangle, Sparkles
+    Edit3, Undo2, CheckCircle2, AlertTriangle, Sparkles, FileSpreadsheet, RefreshCw, Download, Layers, Check
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import * as XLSX from 'xlsx';
@@ -13,11 +13,11 @@ import { API_BASE_URL } from '../config/api';
 
 export default function DeptAdminDashboard() {
     const { toggleTheme, theme } = useTheme();
-    const { students, setStudents } = useData();
+    const { students, setStudents, ktAttempts, setKtAttempts, reconciliationSummary, setReconciliationSummary } = useData();
     const navigate = useNavigate();
 
-    const [viewMode, setViewMode] = useState('dashboard'); // 'dashboard' or 'edit'
-    const [selectedYear, setSelectedYear] = useState(null); // 'SE' or 'TE'
+    const [viewMode, setViewMode] = useState('dashboard'); // 'dashboard', 'edit', or 'kt'
+    const [selectedYear, setSelectedYear] = useState(null); // 'FE', 'SE', 'TE', 'BE', or 'KT'
     const [displayMode, setDisplayMode] = useState('list'); // 'list' or 'grid'
     const [isEditing, setIsEditing] = useState(true);
     const [isLoading, setIsLoading] = useState(false);
@@ -32,6 +32,22 @@ export default function DeptAdminDashboard() {
     const [previewImage, setPreviewImage] = useState(null); // Full-screen image preview
     const [focusedStudent, setFocusedStudent] = useState(null); // Student focused for side panel
     const [searchQuery, setSearchQuery] = useState('');
+
+    // --- KT Processing State ---
+    const [ktSession, setKtSession] = useState('SH 2026');
+    const [ktLevel, setKtLevel] = useState('SE');
+    const [ktSemester, setKtSemester] = useState('sem3');
+    const [ktUploadLoading, setKtUploadLoading] = useState(false);
+    const [ktSearchQuery, setKtSearchQuery] = useState('');
+    const [syncingRegular, setSyncingRegular] = useState(false);
+
+    // --- Final Output & Reconciliation Modal State ---
+    const [showReconcileModal, setShowReconcileModal] = useState(false);
+    const [reconcileLoading, setReconcileLoading] = useState(false);
+    const [reconcileLevel, setReconcileLevel] = useState('SE');
+    const [reconcileSemester, setReconcileSemester] = useState('');
+    const [reconciliationData, setReconciliationData] = useState(null);
+    const [isExportingFinal, setIsExportingFinal] = useState(false);
 
 
     const resetBatch = () => {
@@ -588,6 +604,164 @@ export default function DeptAdminDashboard() {
         }
     };
 
+    const handleSelectKT = () => {
+        setSelectedYear('KT');
+        setViewMode('kt');
+        fetchKTResults();
+    };
+
+    const fetchKTResults = async () => {
+        try {
+            const url = `${API_BASE_URL}/kt-results?student_level=${ktLevel}&semester=${ktSemester}`;
+            const res = await fetch(url);
+            if (res.ok) {
+                const data = await res.json();
+                if (data.success && Array.isArray(data.results)) {
+                    setKtAttempts(data.results);
+                }
+            }
+        } catch (e) {
+            console.warn('Could not load KT results from backend:', e);
+        }
+    };
+
+    const handleKTUpload = async (event) => {
+        const file = event.target.files[0];
+        if (!file) return;
+
+        setKtUploadLoading(true);
+        setError(null);
+
+        const user = JSON.parse(localStorage.getItem('user') || '{}');
+        const formData = new FormData();
+        formData.append('file', file);
+
+        try {
+            const queryParams = new URLSearchParams({
+                user_name: user.name || 'Anonymous',
+                exam_session: ktSession,
+                semester: ktSemester,
+                student_level: ktLevel,
+            });
+
+            const response = await fetch(`${API_BASE_URL}/upload-kt?${queryParams.toString()}`, {
+                method: 'POST',
+                body: formData,
+            });
+
+            if (!response.ok) {
+                const errData = await response.json();
+                throw new Error(errData.detail || 'KT upload failed');
+            }
+
+            const data = await response.json();
+            if (data.success) {
+                alert(`KT Result Processed! Extracted ${data.count} student attempt(s).`);
+                fetchKTResults();
+            }
+        } catch (err) {
+            console.error(err);
+            alert('Error processing KT results: ' + err.message);
+        } finally {
+            setKtUploadLoading(false);
+            event.target.value = '';
+        }
+    };
+
+    const handleSyncRegular = async () => {
+        try {
+            setSyncingRegular(true);
+            const user = JSON.parse(localStorage.getItem('user') || '{}');
+            const masterList = students[ktLevel] || [];
+
+            const res = await fetch(`${API_BASE_URL}/store-regular-attempts`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    student_level: ktLevel,
+                    exam_session: 'FH 2026',
+                    semester: ktSemester,
+                    students: masterList,
+                }),
+            });
+
+            if (res.ok) {
+                const data = await res.json();
+                alert(`Successfully synchronized ${data.imported || 0} regular attempts to reconciliation pool!`);
+            } else {
+                throw new Error('Sync failed');
+            }
+        } catch (e) {
+            alert('Error syncing regular attempts: ' + e.message);
+        } finally {
+            setSyncingRegular(false);
+        }
+    };
+
+    const handleRunReconciliation = async () => {
+        try {
+            setReconcileLoading(true);
+            const res = await fetch(`${API_BASE_URL}/reconcile`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    student_level: reconcileLevel,
+                    semester: reconcileSemester || null,
+                }),
+            });
+
+            if (!res.ok) {
+                const errData = await res.json();
+                throw new Error(errData.detail || 'Reconciliation failed');
+            }
+
+            const data = await res.json();
+            if (data.success) {
+                setReconciliationData(data);
+                if (data.summary) {
+                    setReconciliationSummary(data.summary);
+                }
+            }
+        } catch (e) {
+            alert('Reconciliation error: ' + e.message);
+        } finally {
+            setReconcileLoading(false);
+        }
+    };
+
+    const handleDownloadFinalOutput = async () => {
+        try {
+            setIsExportingFinal(true);
+            const res = await fetch(`${API_BASE_URL}/generate-final-output`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    student_level: reconcileLevel,
+                    semester: reconcileSemester || null,
+                }),
+            });
+
+            if (!res.ok) {
+                const err = await res.json();
+                throw new Error(err.detail || 'Export failed');
+            }
+
+            const blob = await res.blob();
+            const downloadUrl = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = downloadUrl;
+            a.download = `${reconcileLevel}_Consolidated_Results_${new Date().toISOString().slice(0, 10)}.xlsx`;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            window.URL.revokeObjectURL(downloadUrl);
+        } catch (e) {
+            alert('Export failed: ' + e.message);
+        } finally {
+            setIsExportingFinal(false);
+        }
+    };
+
     const handleSelectYear = (year) => {
         setSelectedYear(year);
         const list = students[year] || [];
@@ -619,6 +793,7 @@ export default function DeptAdminDashboard() {
         }
         setViewMode('edit');
     };
+
 
     return (
         <div className="min-h-screen bg-slate-50 dark:bg-slate-950 font-sans pb-20">
@@ -662,7 +837,7 @@ export default function DeptAdminDashboard() {
                             <p className="text-slate-500 mt-2">Select an academic year to manage and edit results.</p>
                         </div>
 
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-8 max-w-4xl mx-auto">
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 max-w-6xl mx-auto">
                             <SelectionCard
                                 title="FE Students"
                                 description="First Year Results Management"
@@ -695,8 +870,51 @@ export default function DeptAdminDashboard() {
                                 color="orange"
                                 onClick={() => handleSelectYear('BE')}
                             />
+                            <SelectionCard
+                                title="KT Processing"
+                                description="Re-examination & Multi-Attempt Tracking"
+                                stats="FH / SH Exam Sessions"
+                                icon={AlertTriangle}
+                                color="rose"
+                                onClick={handleSelectKT}
+                            />
+                            <SelectionCard
+                                title="Final Reconciliation"
+                                description="Generate Consolidated 3-Sheet Output"
+                                stats="Reconcile & Excel Export"
+                                icon={FileSpreadsheet}
+                                color="indigo"
+                                onClick={() => {
+                                    setShowReconcileModal(true);
+                                    handleRunReconciliation();
+                                }}
+                            />
                         </div>
                     </div>
+
+                ) : viewMode === 'kt' ? (
+                    <KTProcessingView
+                        onBack={() => setViewMode('dashboard')}
+                        ktAttempts={ktAttempts}
+                        ktSession={ktSession}
+                        setKtSession={setKtSession}
+                        ktLevel={ktLevel}
+                        setKtLevel={setKtLevel}
+                        ktSemester={ktSemester}
+                        setKtSemester={setKtSemester}
+                        onUpload={handleKTUpload}
+                        isLoading={ktUploadLoading}
+                        onSyncRegular={handleSyncRegular}
+                        isSyncing={syncingRegular}
+                        onRefresh={fetchKTResults}
+                        onOpenReconcile={() => {
+                            setReconcileLevel(ktLevel);
+                            setReconcileSemester(ktSemester);
+                            setShowReconcileModal(true);
+                            handleRunReconciliation();
+                        }}
+                        onPreviewImage={setPreviewImage}
+                    />
                 ) : (
                     <div className="animate-fade-in space-y-6">
                         <button
@@ -706,6 +924,7 @@ export default function DeptAdminDashboard() {
                             <ArrowLeft className="w-4 h-4 group-hover:-translate-x-1 transition-transform" />
                             <span>Back to Selection</span>
                         </button>
+
 
                         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6 mb-8 bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm">
                             <div>
@@ -847,7 +1066,19 @@ export default function DeptAdminDashboard() {
                                     </div>
                                 )}
 
-                                <div className="flex items-center gap-1">
+                                <div className="flex items-center gap-1.5">
+                                    <button
+                                        onClick={() => {
+                                            setReconcileLevel(selectedYear);
+                                            setShowReconcileModal(true);
+                                            handleRunReconciliation();
+                                        }}
+                                        className="px-3 py-2 text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 border border-indigo-200 dark:border-indigo-800/40 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5"
+                                        title="Reconcile and generate 3-sheet Excel"
+                                    >
+                                        <FileSpreadsheet className="w-4 h-4" />
+                                        <span>Reconcile Output</span>
+                                    </button>
                                     <button
                                         onClick={handleExportToExcel}
                                         className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-xl transition-all"
@@ -864,6 +1095,7 @@ export default function DeptAdminDashboard() {
                                         <Send className="w-5 h-5" />
                                     </button>
                                 </div>
+
                             </div>
                         </div>
 
@@ -1144,8 +1376,26 @@ export default function DeptAdminDashboard() {
                 )}
             </main>
 
+            {/* Final Batch Reconciliation Modal */}
+            {showReconcileModal && (
+                <ReconciliationModal
+                    isOpen={showReconcileModal}
+                    onClose={() => setShowReconcileModal(false)}
+                    reconcileLevel={reconcileLevel}
+                    setReconcileLevel={setReconcileLevel}
+                    reconcileSemester={reconcileSemester}
+                    setReconcileSemester={setReconcileSemester}
+                    onRun={handleRunReconciliation}
+                    isLoading={reconcileLoading}
+                    data={reconciliationData}
+                    onDownload={handleDownloadFinalOutput}
+                    isDownloading={isExportingFinal}
+                />
+            )}
+
             {/* Full-screen Image Preview Modal */}
             {previewImage && (
+
                 <div 
                     className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/90 backdrop-blur-md transition-all p-4 md:p-12 animate-in fade-in duration-300"
                     onClick={() => setPreviewImage(null)}
@@ -1184,7 +1434,9 @@ function SelectionCard({ title, description, stats, icon: Icon, color, onClick }
         emerald: "bg-emerald-50 text-emerald-600 group-hover:bg-emerald-600 shadow-emerald-100",
         blue: "bg-blue-50 text-blue-600 group-hover:bg-blue-600 shadow-blue-100",
         purple: "bg-purple-50 text-purple-600 group-hover:bg-purple-600 shadow-purple-100",
-        orange: "bg-orange-50 text-orange-600 group-hover:bg-orange-600 shadow-orange-100"
+        orange: "bg-orange-50 text-orange-600 group-hover:bg-orange-600 shadow-orange-100",
+        rose: "bg-rose-50 text-rose-600 group-hover:bg-rose-600 shadow-rose-100",
+        indigo: "bg-indigo-50 text-indigo-600 group-hover:bg-indigo-600 shadow-indigo-100",
     };
     const colorStyles = colorConfigs[color] || colorConfigs.blue;
     return (
@@ -1404,3 +1656,595 @@ function calculateAvg(marks) {
     const vals = Object.values(marks).map(m => m.gpa).filter(v => typeof v === 'number' && v > 0);
     return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : 0;
 }
+
+// =========================================================================
+// KT Examination Processing View Component
+// =========================================================================
+
+function KTProcessingView({
+    onBack,
+    ktAttempts = [],
+    ktSession,
+    setKtSession,
+    ktLevel,
+    setKtLevel,
+    ktSemester,
+    setKtSemester,
+    onUpload,
+    isLoading,
+    onSyncRegular,
+    isSyncing,
+    onRefresh,
+    onOpenReconcile,
+    onPreviewImage,
+}) {
+    const [searchTerm, setSearchTerm] = useState('');
+
+    const filtered = useMemo(() => {
+        return (ktAttempts || []).filter(item => {
+            const sid = (item.student_identifier || '').toLowerCase();
+            const sname = (item.student_name || '').toLowerCase();
+            const term = searchTerm.toLowerCase();
+            return sid.includes(term) || sname.includes(term);
+        });
+    }, [ktAttempts, searchTerm]);
+
+    const stats = useMemo(() => {
+        const total = ktAttempts.length;
+        const passed = ktAttempts.filter(a => (a.attempt_status || '').toUpperCase() === 'PASS').length;
+        const failed = ktAttempts.filter(a => (a.attempt_status || '').toUpperCase() === 'FAIL').length;
+        const withPointers = ktAttempts.filter(a => a.clearance_pointer && a.clearance_pointer.trim()).length;
+        return { total, passed, failed, withPointers };
+    }, [ktAttempts]);
+
+    return (
+        <div className="animate-fade-in space-y-6">
+            <button
+                onClick={onBack}
+                className="flex items-center gap-2 text-slate-500 hover:text-blue-600 transition-colors group mb-2"
+            >
+                <ArrowLeft className="w-4 h-4 group-hover:-translate-x-1 transition-transform" />
+                <span>Back to Dashboard</span>
+            </button>
+
+            {/* Header & Controls */}
+            <div className="bg-white dark:bg-slate-900 p-6 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-sm space-y-6">
+                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-slate-100 dark:border-slate-800 pb-5">
+                    <div>
+                        <div className="flex items-center gap-2">
+                            <span className="px-2.5 py-1 bg-rose-500/10 text-rose-600 dark:text-rose-400 font-black text-[10px] tracking-wider uppercase rounded-lg border border-rose-500/20">
+                                Multi-Attempt Processing
+                            </span>
+                            <h2 className="text-2xl font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                                KT Examination Workspace
+                            </h2>
+                        </div>
+                        <p className="text-sm text-slate-500 mt-1">
+                            Upload and inspect re-examination attempts across examination sessions (FH/SH).
+                        </p>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2.5">
+                        <button
+                            onClick={onSyncRegular}
+                            disabled={isSyncing}
+                            className="px-3.5 py-2 text-xs font-bold text-blue-600 bg-blue-50 dark:bg-blue-900/20 hover:bg-blue-100 dark:hover:bg-blue-900/40 border border-blue-200 dark:border-blue-800/40 rounded-xl transition-all flex items-center gap-1.5"
+                            title="Sync regular student attempts into the database table for multi-attempt reconciliation"
+                        >
+                            <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
+                            <span>{isSyncing ? 'Syncing...' : 'Sync Regular Pool'}</span>
+                        </button>
+
+                        <button
+                            onClick={onRefresh}
+                            className="p-2 text-slate-500 hover:text-blue-600 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition-all"
+                            title="Refresh KT Records"
+                        >
+                            <RefreshCw className="w-4 h-4" />
+                        </button>
+
+                        <button
+                            onClick={onOpenReconcile}
+                            className="px-4 py-2 bg-gradient-to-r from-indigo-600 to-blue-600 text-white text-xs font-bold rounded-xl flex items-center gap-2 shadow-lg shadow-indigo-500/20 hover:opacity-95 transition-all"
+                        >
+                            <FileSpreadsheet className="w-4 h-4" />
+                            <span>Run Reconciliation & Output</span>
+                        </button>
+                    </div>
+                </div>
+
+                {/* Scope Selectors & Upload Form */}
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
+                    <div>
+                        <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1.5 block">
+                            Student Level
+                        </label>
+                        <select
+                            value={ktLevel}
+                            onChange={(e) => setKtLevel(e.target.value)}
+                            className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-sm font-semibold text-slate-900 dark:text-white outline-none focus:ring-2 focus:ring-rose-500"
+                        >
+                            <option value="FE">FE (First Year)</option>
+                            <option value="SE">SE (Second Year)</option>
+                            <option value="TE">TE (Third Year)</option>
+                            <option value="BE">BE (Final Year)</option>
+                        </select>
+                    </div>
+
+                    <div>
+                        <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1.5 block">
+                            Examination Session
+                        </label>
+                        <input
+                            type="text"
+                            value={ktSession}
+                            onChange={(e) => setKtSession(e.target.value)}
+                            placeholder="e.g. SH 2026 or FH 2026"
+                            className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-sm font-semibold text-slate-900 dark:text-white outline-none focus:ring-2 focus:ring-rose-500"
+                        />
+                    </div>
+
+                    <div>
+                        <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1.5 block">
+                            Semester
+                        </label>
+                        <select
+                            value={ktSemester}
+                            onChange={(e) => setKtSemester(e.target.value)}
+                            className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-sm font-semibold text-slate-900 dark:text-white outline-none focus:ring-2 focus:ring-rose-500"
+                        >
+                            {[1, 2, 3, 4, 5, 6, 7, 8].map(s => (
+                                <option key={s} value={`sem${s}`}>Semester {s}</option>
+                            ))}
+                        </select>
+                    </div>
+
+                    <div>
+                        <label className={`w-full py-2.5 px-4 bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-2 shadow-lg shadow-rose-500/20 cursor-pointer transition-all ${isLoading ? 'opacity-50 pointer-events-none' : ''}`}>
+                            <Upload className="w-4 h-4" />
+                            <span>{isLoading ? 'Processing PDF OCR...' : 'Import KT PDF'}</span>
+                            <input
+                                type="file"
+                                accept="application/pdf"
+                                className="hidden"
+                                onChange={onUpload}
+                                disabled={isLoading}
+                            />
+                        </label>
+                    </div>
+                </div>
+
+                {/* Quick Metric Cards */}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 pt-2">
+                    <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/50 border border-slate-100 dark:border-slate-800">
+                        <div className="text-xs font-medium text-slate-400">Total KT Records</div>
+                        <div className="text-2xl font-extrabold text-slate-900 dark:text-white mt-1">{stats.total}</div>
+                    </div>
+                    <div className="p-4 rounded-2xl bg-emerald-50/60 dark:bg-emerald-950/20 border border-emerald-200/50 dark:border-emerald-800/30">
+                        <div className="text-xs font-bold text-emerald-600 dark:text-emerald-400">Passed KT Attempts</div>
+                        <div className="text-2xl font-extrabold text-emerald-600 dark:text-emerald-400 mt-1">{stats.passed}</div>
+                    </div>
+                    <div className="p-4 rounded-2xl bg-rose-50/60 dark:bg-rose-950/20 border border-rose-200/50 dark:border-rose-800/30">
+                        <div className="text-xs font-bold text-rose-600 dark:text-rose-400">Failed KT Attempts</div>
+                        <div className="text-2xl font-extrabold text-rose-600 dark:text-rose-400 mt-1">{stats.failed}</div>
+                    </div>
+                    <div className="p-4 rounded-2xl bg-purple-50/60 dark:bg-purple-950/20 border border-purple-200/50 dark:border-purple-800/30">
+                        <div className="text-xs font-bold text-purple-600 dark:text-purple-400">With Clearance Pointer</div>
+                        <div className="text-2xl font-extrabold text-purple-600 dark:text-purple-400 mt-1">{stats.withPointers}</div>
+                    </div>
+                </div>
+            </div>
+
+            {/* KT Attempts Table */}
+            <div className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden">
+                <div className="p-4 border-b border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row justify-between items-center gap-3">
+                    <div className="relative w-full sm:w-80">
+                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                        <input
+                            type="text"
+                            placeholder="Filter by ERN, Seat or Name..."
+                            value={searchTerm}
+                            onChange={(e) => setSearchTerm(e.target.value)}
+                            className="w-full pl-9 pr-4 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-xs focus:ring-2 focus:ring-rose-500 outline-none text-slate-900 dark:text-white"
+                        />
+                    </div>
+                    <div className="text-xs text-slate-400 font-medium">
+                        Showing {filtered.length} of {ktAttempts.length} KT attempts
+                    </div>
+                </div>
+
+                <div className="overflow-x-auto">
+                    <table className="w-full text-xs text-left">
+                        <thead>
+                            <tr className="bg-slate-50 dark:bg-slate-800/50 border-b border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 uppercase tracking-wider text-[10px]">
+                                <th className="px-5 py-3.5 font-bold">Student Identifier</th>
+                                <th className="px-5 py-3.5 font-bold">Student Name</th>
+                                <th className="px-4 py-3.5 font-bold text-center">Level</th>
+                                <th className="px-4 py-3.5 font-bold text-center">Session</th>
+                                <th className="px-4 py-3.5 font-bold text-center">Semester</th>
+                                <th className="px-4 py-3.5 font-bold text-center">Status</th>
+                                <th className="px-4 py-3.5 font-bold text-center">GPA</th>
+                                <th className="px-5 py-3.5 font-bold">Clearance Pointer</th>
+                                <th className="px-5 py-3.5 font-bold">Source PDF</th>
+                                <th className="px-4 py-3.5 font-bold text-center">Evidence</th>
+                            </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 dark:divide-slate-800 text-slate-700 dark:text-slate-300">
+                            {filtered.length > 0 ? (
+                                filtered.map((att, idx) => {
+                                    const isPass = (att.attempt_status || '').toUpperCase() === 'PASS';
+                                    return (
+                                        <tr key={att.attempt_id || idx} className="hover:bg-slate-50/60 dark:hover:bg-slate-800/40 transition-colors">
+                                            <td className="px-5 py-3.5 font-mono font-bold text-slate-900 dark:text-white">
+                                                {att.student_identifier || 'N/A'}
+                                            </td>
+                                            <td className="px-5 py-3.5 font-medium">
+                                                {att.student_name || <span className="text-slate-400 italic">Unassigned</span>}
+                                            </td>
+                                            <td className="px-4 py-3.5 text-center">
+                                                <span className="px-2 py-0.5 bg-slate-100 dark:bg-slate-800 rounded font-semibold text-[10px]">
+                                                    {att.student_level || ktLevel}
+                                                </span>
+                                            </td>
+                                            <td className="px-4 py-3.5 text-center font-semibold text-slate-600 dark:text-slate-400">
+                                                {att.exam_session}
+                                            </td>
+                                            <td className="px-4 py-3.5 text-center font-mono">
+                                                {att.semester}
+                                            </td>
+                                            <td className="px-4 py-3.5 text-center">
+                                                <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full font-black text-[10px] tracking-wide border ${
+                                                    isPass
+                                                        ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-600 dark:text-emerald-400 border-emerald-500/30'
+                                                        : 'bg-rose-50 dark:bg-rose-950/40 text-rose-600 dark:text-rose-400 border-rose-500/30'
+                                                }`}>
+                                                    {isPass ? <CheckCircle2 className="w-3 h-3" /> : <AlertTriangle className="w-3 h-3" />}
+                                                    {att.attempt_status}
+                                                </span>
+                                            </td>
+                                            <td className="px-4 py-3.5 text-center font-mono font-bold">
+                                                {Number(att.gpa || 0).toFixed(2)}
+                                            </td>
+                                            <td className="px-5 py-3.5">
+                                                {att.clearance_pointer ? (
+                                                    <span className="px-2 py-0.5 bg-purple-50 dark:bg-purple-950/40 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800 rounded text-[10px] font-mono">
+                                                        {att.clearance_pointer}
+                                                    </span>
+                                                ) : (
+                                                    <span className="text-slate-400 text-[11px]">—</span>
+                                                )}
+                                            </td>
+                                            <td className="px-5 py-3.5 text-[11px] text-slate-500 truncate max-w-[150px]" title={att.source_pdf}>
+                                                {att.source_pdf || 'Uploaded PDF'}
+                                            </td>
+                                            <td className="px-4 py-3.5 text-center">
+                                                {att.screenshot ? (
+                                                    <button
+                                                        onClick={() => onPreviewImage(att.screenshot)}
+                                                        className="p-1 hover:bg-slate-100 dark:hover:bg-slate-800 text-blue-600 rounded transition-colors"
+                                                        title="View extraction image snippet"
+                                                    >
+                                                        <Eye className="w-4 h-4" />
+                                                    </button>
+                                                ) : (
+                                                    <span className="text-slate-400">—</span>
+                                                )}
+                                            </td>
+                                        </tr>
+                                    );
+                                })
+                            ) : (
+                                <tr>
+                                    <td colSpan={10} className="px-6 py-12 text-center text-slate-400">
+                                        <Layers className="w-8 h-8 mx-auto mb-2 opacity-40" />
+                                        <p className="font-semibold">No KT examination records found.</p>
+                                        <p className="text-xs text-slate-500 mt-1">Import a KT examination PDF above or refresh records.</p>
+                                    </td>
+                                </tr>
+                            )}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+
+// =========================================================================
+// Reconciliation & Final Output Modal Component
+// =========================================================================
+
+function ReconciliationModal({
+    isOpen,
+    onClose,
+    reconcileLevel,
+    setReconcileLevel,
+    reconcileSemester,
+    setReconcileSemester,
+    onRun,
+    isLoading,
+    data,
+    onDownload,
+    isDownloading,
+}) {
+    const [searchQuery, setSearchQuery] = useState('');
+    const [filterStatus, setFilterStatus] = useState('ALL');
+
+    const summary = data?.summary || null;
+    const results = data?.results || [];
+    const exceptions = data?.exceptions || [];
+
+    const filteredResults = useMemo(() => {
+        return results.filter(r => {
+            const matchSearch =
+                (r.student_identifier || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+                (r.student_name || '').toLowerCase().includes(searchQuery.toLowerCase());
+            const matchFilter = filterStatus === 'ALL' || r.clearance_status === filterStatus;
+            return matchSearch && matchFilter;
+        });
+    }, [results, searchQuery, filterStatus]);
+
+    if (!isOpen) return null;
+
+    return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md animate-in fade-in duration-200">
+            <div className="bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 max-w-6xl w-full max-h-[92vh] flex flex-col overflow-hidden animate-in zoom-in-95 duration-200">
+                {/* Modal Header */}
+                <div className="px-8 py-5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between bg-slate-50/50 dark:bg-slate-800/40">
+                    <div>
+                        <div className="flex items-center gap-2">
+                            <span className="px-2.5 py-0.5 bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 font-bold text-[10px] tracking-wider uppercase rounded-md border border-indigo-500/20">
+                                Output Engine
+                            </span>
+                            <h3 className="text-xl font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                                Result Reconciliation & Consolidated Output
+                            </h3>
+                        </div>
+                        <p className="text-xs text-slate-500 mt-1">
+                            Reconciles multiple attempts, establishes KT clearance evidence, and generates standardized 3-sheet Excel.
+                        </p>
+                    </div>
+                    <button
+                        onClick={onClose}
+                        className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                    >
+                        <X className="w-5 h-5" />
+                    </button>
+                </div>
+
+                {/* Filter and Trigger Bar */}
+                <div className="px-8 py-4 bg-slate-50/30 dark:bg-slate-800/20 border-b border-slate-100 dark:border-slate-800 flex flex-wrap items-center justify-between gap-4">
+                    <div className="flex flex-wrap items-center gap-3">
+                        <div className="flex items-center gap-2">
+                            <span className="text-xs font-bold text-slate-500 uppercase">Level:</span>
+                            <select
+                                value={reconcileLevel}
+                                onChange={(e) => setReconcileLevel(e.target.value)}
+                                className="px-3 py-1.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-xs font-bold text-indigo-600 outline-none cursor-pointer"
+                            >
+                                <option value="FE">FE</option>
+                                <option value="SE">SE</option>
+                                <option value="TE">TE</option>
+                                <option value="BE">BE</option>
+                            </select>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                            <span className="text-xs font-bold text-slate-500 uppercase">Semester:</span>
+                            <select
+                                value={reconcileSemester}
+                                onChange={(e) => setReconcileSemester(e.target.value)}
+                                className="px-3 py-1.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-xs font-bold text-indigo-600 outline-none cursor-pointer"
+                            >
+                                <option value="">All Semesters</option>
+                                {[1, 2, 3, 4, 5, 6, 7, 8].map(s => (
+                                    <option key={s} value={`sem${s}`}>Semester {s}</option>
+                                ))}
+                            </select>
+                        </div>
+
+                        <button
+                            onClick={onRun}
+                            disabled={isLoading}
+                            className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold flex items-center gap-2 shadow-md shadow-indigo-500/20 transition-all disabled:opacity-50"
+                        >
+                            <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
+                            <span>{isLoading ? 'Running Engine...' : 'Run Reconciliation'}</span>
+                        </button>
+                    </div>
+
+                    <button
+                        onClick={onDownload}
+                        disabled={isDownloading || !summary || summary.total_students === 0}
+                        className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold flex items-center gap-2 shadow-lg shadow-emerald-500/20 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                        <Download className="w-4 h-4" />
+                        <span>{isDownloading ? 'Generating Excel...' : 'Download Consolidated Excel'}</span>
+                    </button>
+                </div>
+
+                {/* Content Area */}
+                <div className="flex-1 overflow-y-auto p-8 space-y-6">
+                    {/* Summary Counters */}
+                    {summary ? (
+                        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+                            <div className="p-3.5 bg-slate-50 dark:bg-slate-800/60 rounded-2xl border border-slate-200/60 dark:border-slate-800">
+                                <div className="text-[11px] font-semibold text-slate-400">Total Students</div>
+                                <div className="text-xl font-black text-slate-900 dark:text-white mt-1">{summary.total_students}</div>
+                            </div>
+                            <div className="p-3.5 bg-emerald-50 dark:bg-emerald-950/30 rounded-2xl border border-emerald-200/60 dark:border-emerald-800/40">
+                                <div className="text-[11px] font-bold text-emerald-600 dark:text-emerald-400">Original Pass</div>
+                                <div className="text-xl font-black text-emerald-600 dark:text-emerald-400 mt-1">{summary.pass_count}</div>
+                            </div>
+                            <div className="p-3.5 bg-blue-50 dark:bg-blue-950/30 rounded-2xl border border-blue-200/60 dark:border-blue-800/40">
+                                <div className="text-[11px] font-bold text-blue-600 dark:text-blue-400">Cleared Later</div>
+                                <div className="text-xl font-black text-blue-600 dark:text-blue-400 mt-1">{summary.cleared_count}</div>
+                            </div>
+                            <div className="p-3.5 bg-rose-50 dark:bg-rose-950/30 rounded-2xl border border-rose-200/60 dark:border-rose-800/40">
+                                <div className="text-[11px] font-bold text-rose-600 dark:text-rose-400">Uncleared Fail</div>
+                                <div className="text-xl font-black text-rose-600 dark:text-rose-400 mt-1">{summary.uncleared_count}</div>
+                            </div>
+                            <div className="p-3.5 bg-amber-50 dark:bg-amber-950/30 rounded-2xl border border-amber-200/60 dark:border-amber-800/40">
+                                <div className="text-[11px] font-bold text-amber-600 dark:text-amber-400">Pending KT</div>
+                                <div className="text-xl font-black text-amber-600 dark:text-amber-400 mt-1">{summary.pending_count}</div>
+                            </div>
+                            <div className="p-3.5 bg-purple-50 dark:bg-purple-950/30 rounded-2xl border border-purple-200/60 dark:border-purple-800/40">
+                                <div className="text-[11px] font-bold text-purple-600 dark:text-purple-400">Exceptions</div>
+                                <div className="text-xl font-black text-purple-600 dark:text-purple-400 mt-1">{exceptions.length}</div>
+                            </div>
+                        </div>
+                    ) : (
+                        <div className="p-6 text-center text-slate-400 bg-slate-50 dark:bg-slate-800/40 rounded-2xl border border-slate-200 dark:border-slate-800">
+                            Click "Run Reconciliation" above to process stored regular and KT attempts.
+                        </div>
+                    )}
+
+                    {/* Exceptions Notice */}
+                    {exceptions.length > 0 && (
+                        <div className="bg-rose-50/70 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-800/60 rounded-2xl p-4">
+                            <div className="flex items-center gap-2 text-rose-700 dark:text-rose-300 font-bold text-xs mb-3">
+                                <AlertTriangle className="w-4 h-4 text-rose-600" />
+                                <span>Exceptions & Discrepancies Requiring Review ({exceptions.length})</span>
+                            </div>
+                            <div className="space-y-2 max-h-48 overflow-y-auto">
+                                {exceptions.map((exc, idx) => (
+                                    <div key={idx} className="bg-white/80 dark:bg-slate-900/80 p-3 rounded-xl border border-rose-100 dark:border-rose-900/30 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                                        <div className="space-y-0.5">
+                                            <div className="flex items-center gap-2">
+                                                <span className="px-2 py-0.5 rounded bg-rose-100 dark:bg-rose-900/50 text-rose-700 dark:text-rose-300 font-black text-[10px]">
+                                                    {exc.exception_type}
+                                                </span>
+                                                <span className="font-mono font-bold text-slate-900 dark:text-white">
+                                                    {exc.student_identifier || 'Unidentified'}
+                                                </span>
+                                                {exc.student_name && (
+                                                    <span className="text-slate-500 font-medium">— {exc.student_name}</span>
+                                                )}
+                                            </div>
+                                            <p className="text-slate-600 dark:text-slate-300 text-[11px]">{exc.description}</p>
+                                        </div>
+                                        <span className="text-[10px] text-amber-600 dark:text-amber-400 font-semibold italic whitespace-nowrap">
+                                            {exc.action_required}
+                                        </span>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Student Reconciliation Results List */}
+                    {results.length > 0 && (
+                        <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden">
+                            <div className="p-4 border-b border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row justify-between items-center gap-3">
+                                <div className="relative w-full sm:w-72">
+                                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                                    <input
+                                        type="text"
+                                        placeholder="Search student results..."
+                                        value={searchQuery}
+                                        onChange={(e) => setSearchQuery(e.target.value)}
+                                        className="w-full pl-9 pr-3 py-1.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-xs outline-none focus:ring-2 focus:ring-indigo-500 text-slate-900 dark:text-white"
+                                    />
+                                </div>
+
+                                <div className="flex items-center gap-1.5 overflow-x-auto w-full sm:w-auto">
+                                    {['ALL', 'PASSED_ORIGINAL', 'CLEARED_SUBSEQUENTLY', 'UNCLEARED', 'PENDING', 'NEEDS_REVIEW'].map(st => (
+                                        <button
+                                            key={st}
+                                            onClick={() => setFilterStatus(st)}
+                                            className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition-all whitespace-nowrap ${
+                                                filterStatus === st
+                                                    ? 'bg-indigo-600 text-white'
+                                                    : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200'
+                                            }`}
+                                        >
+                                            {st.replace('_', ' ')}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+
+                            <div className="overflow-x-auto max-h-96">
+                                <table className="w-full text-xs text-left">
+                                    <thead className="sticky top-0 bg-slate-50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-800 text-[10px] uppercase text-slate-500 font-bold z-10">
+                                        <tr>
+                                            <th className="px-5 py-3">Student ID</th>
+                                            <th className="px-5 py-3">Student Name</th>
+                                            <th className="px-3 py-3 text-center">Level</th>
+                                            <th className="px-3 py-3 text-center">Attempts</th>
+                                            <th className="px-4 py-3 text-center">Clearance Status</th>
+                                            <th className="px-4 py-3 text-center">Clearing Session</th>
+                                            <th className="px-5 py-3">Final Reconciliation Verdict</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                                        {filteredResults.map((r, idx) => {
+                                            const cs = r.clearance_status;
+                                            let badgeStyle = 'bg-slate-100 text-slate-600 border-slate-200';
+                                            if (cs === 'PASSED_ORIGINAL') {
+                                                badgeStyle = 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-400 border-emerald-500/30';
+                                            } else if (cs === 'CLEARED_SUBSEQUENTLY') {
+                                                badgeStyle = 'bg-blue-50 dark:bg-blue-950/40 text-blue-700 dark:text-blue-400 border-blue-500/30';
+                                            } else if (cs === 'UNCLEARED') {
+                                                badgeStyle = 'bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-400 border-rose-500/30';
+                                            } else if (cs === 'PENDING') {
+                                                badgeStyle = 'bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-400 border-amber-500/30';
+                                            } else if (cs === 'NEEDS_REVIEW') {
+                                                badgeStyle = 'bg-purple-50 dark:bg-purple-950/40 text-purple-700 dark:text-purple-400 border-purple-500/30';
+                                            }
+
+                                            return (
+                                                <tr key={idx} className="hover:bg-slate-50/60 dark:hover:bg-slate-800/40 transition-colors">
+                                                    <td className="px-5 py-3 font-mono font-bold text-slate-900 dark:text-white">
+                                                        {r.student_identifier}
+                                                    </td>
+                                                    <td className="px-5 py-3 font-medium">
+                                                        {r.student_name || <span className="text-slate-400 italic">Unassigned</span>}
+                                                    </td>
+                                                    <td className="px-3 py-3 text-center font-bold">
+                                                        {r.student_level}
+                                                    </td>
+                                                    <td className="px-3 py-3 text-center font-mono">
+                                                        <span className="px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-[10px] font-bold">
+                                                            {r.total_attempts}
+                                                        </span>
+                                                    </td>
+                                                    <td className="px-4 py-3 text-center">
+                                                        <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wide border ${badgeStyle}`}>
+                                                            {r.clearance_status.replace('_', ' ')}
+                                                        </span>
+                                                    </td>
+                                                    <td className="px-4 py-3 text-center font-semibold text-slate-600 dark:text-slate-400">
+                                                        {r.clearance_session || '—'}
+                                                    </td>
+                                                    <td className="px-5 py-3 text-slate-600 dark:text-slate-300 text-[11px]">
+                                                        {r.final_status}
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    )}
+                </div>
+
+                {/* Modal Footer */}
+                <div className="px-8 py-4 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between bg-slate-50/50 dark:bg-slate-800/30">
+                    <p className="text-xs text-slate-400">
+                        Exported workbook adheres to university audit standards with Consolidated, Attempt History, and Exception sheets.
+                    </p>
+                    <button
+                        onClick={onClose}
+                        className="px-4 py-2 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition-colors"
+                    >
+                        Close
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+}
+

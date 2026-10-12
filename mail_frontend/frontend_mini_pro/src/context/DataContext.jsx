@@ -189,6 +189,19 @@ export const DataProvider = ({ children }) => {
         return initialStudentsData;
     });
 
+    // KT examination attempts state
+    const [ktAttempts, setKtAttempts] = useState(() => {
+        try {
+            const saved = localStorage.getItem('global_kt_attempts');
+            return saved ? JSON.parse(saved) : [];
+        } catch (e) {
+            return [];
+        }
+    });
+
+    // Reconciliation summary state
+    const [reconciliationSummary, setReconciliationSummary] = useState(null);
+
     const [admins, setAdmins] = useState(() => {
         const saved = localStorage.getItem('global_admins_data');
         return saved ? JSON.parse(saved) : [
@@ -235,8 +248,17 @@ export const DataProvider = ({ children }) => {
         localStorage.setItem('global_admins_data', JSON.stringify(admins));
     }, [admins]);
 
+    useEffect(() => {
+        localStorage.setItem('global_kt_attempts', JSON.stringify(ktAttempts));
+    }, [ktAttempts]);
+
     return (
-        <DataContext.Provider value={{ students, setStudents, admins, setAdmins }}>
+        <DataContext.Provider value={{
+            students, setStudents,
+            admins, setAdmins,
+            ktAttempts, setKtAttempts,
+            reconciliationSummary, setReconciliationSummary,
+        }}>
             {children}
         </DataContext.Provider>
     );
