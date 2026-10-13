@@ -58,6 +58,26 @@ CREATE TABLE IF NOT EXISTS student_name (
     student_email VARCHAR(255)
 );
 
+-- 5b. Examination Attempts (Reconciliation & Multi-attempt tracking)
+CREATE TABLE IF NOT EXISTS examination_attempts (
+    attempt_id INT AUTO_INCREMENT PRIMARY KEY,
+    student_identifier VARCHAR(255) NOT NULL,
+    student_name VARCHAR(255) DEFAULT '',
+    student_level VARCHAR(10) DEFAULT 'SE',
+    exam_session VARCHAR(50) NOT NULL,
+    semester VARCHAR(20) DEFAULT '',
+    attempt_status VARCHAR(10) DEFAULT 'UNKNOWN',
+    gpa FLOAT DEFAULT 0.0,
+    clearance_pointer TEXT,
+    source_pdf VARCHAR(255) DEFAULT '',
+    file_id INT DEFAULT NULL,
+    screenshot LONGTEXT,
+    exam_type VARCHAR(20) DEFAULT 'REGULAR',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY unique_attempt (student_identifier, exam_session, semester, exam_type)
+);
+
 -- 6. Detailed Subject-wise Marks
 CREATE TABLE IF NOT EXISTS detailed_results (
     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -90,6 +110,27 @@ CREATE TABLE IF NOT EXISTS student_performance (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY student_sem (ern, semester)
 );
+
+-- 9. Examination Attempts (Multi-attempt support for KT/reconciliation)
+CREATE TABLE IF NOT EXISTS examination_attempts (
+    attempt_id INT AUTO_INCREMENT PRIMARY KEY,
+    student_identifier VARCHAR(255) NOT NULL,
+    student_name VARCHAR(255) DEFAULT '',
+    student_level VARCHAR(10) DEFAULT 'SE',
+    exam_session VARCHAR(50) NOT NULL,
+    semester VARCHAR(20) DEFAULT '',
+    attempt_status VARCHAR(10) DEFAULT 'UNKNOWN',
+    gpa FLOAT DEFAULT 0.0,
+    clearance_pointer TEXT,
+    source_pdf VARCHAR(255) DEFAULT '',
+    file_id INT DEFAULT NULL,
+    screenshot LONGTEXT,
+    exam_type VARCHAR(20) DEFAULT 'REGULAR',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY unique_attempt (student_identifier, exam_session, semester, exam_type)
+);
+
 
 -- ========================================================
 -- Seed Default Admins

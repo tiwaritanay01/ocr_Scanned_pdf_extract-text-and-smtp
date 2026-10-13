@@ -15,7 +15,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
 from pydantic import BaseModel
-from typing import List, Optional, Any
+from typing import List, Optional, Any, Dict
 from dotenv import load_dotenv
 from fastapi.responses import StreamingResponse
 import importlib
@@ -914,6 +914,696 @@ async def get_analytics_stats(semester: str = None):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# --- 6. KT Processing, Reconciliation & Final Output ---
+
+def ensure_examination_attempts_table():
+    """Create the examination_attempts table if it doesn't exist."""
+    try:
+        conn = get_db_conn()
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS examination_attempts (
+                attempt_id INT AUTO_INCREMENT PRIMARY KEY,
+                student_identifier VARCHAR(255) NOT NULL,
+                student_name VARCHAR(255) DEFAULT '',
+                student_level VARCHAR(10) DEFAULT 'SE',
+                exam_session VARCHAR(50) NOT NULL,
+                semester VARCHAR(20) DEFAULT '',
+                attempt_status VARCHAR(10) DEFAULT 'UNKNOWN',
+                gpa FLOAT DEFAULT 0.0,
+                clearance_pointer TEXT,
+                source_pdf VARCHAR(255) DEFAULT '',
+                file_id INT DEFAULT NULL,
+                screenshot LONGTEXT,
+                exam_type VARCHAR(20) DEFAULT 'REGULAR',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY unique_attempt (student_identifier, exam_session, semester, exam_type)
+            )
+        """)
+        conn.commit()
+        cursor.close()
+        conn.close()
+        print("[Init DB] examination_attempts table verified.")
+    except Exception as e:
+        print(f"[Init DB Warning] examination_attempts migration: {e}")
+
+# Run migration on import
+try:
+    ensure_examination_attempts_table()
+except Exception:
+    pass
+
+@app.on_event("startup")
+def on_kt_startup():
+    ensure_examination_attempts_table()
+
+
+class KTUploadParams(BaseModel):
+    exam_session: str = "SH 2026"
+    semester: str = "sem3"
+    student_level: str = "SE"
+
+
+@app.post("/upload-kt")
+async def upload_kt(
+    file: UploadFile = File(...),
+    user_name: str = "Anonymous",
+    exam_session: str = "SH 2026",
+    semester: str = "sem3",
+    student_level: str = "SE",
+):
+    """Upload a KT/re-examination result PDF and store as KT examination attempts."""
+    if not file.filename.endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF allowed")
+
+    f_id = track_file_upload(file.filename, user_name, "PDF")
+    add_db_log(user_name, "KT Upload", f"Processing KT file {file.filename} for {exam_session} {semester}")
+
+    file_id = str(uuid.uuid4())
+    temp_file_path = os.path.join(UPLOAD_DIR, f"{file_id}_{file.filename}")
+    with open(temp_file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    from FE_BE import process_pdf_to_generator
+
+    all_students = []
+    duplicates = 0
+    errors = []
+    try:
+        conn = get_db_conn()
+        cursor = conn.cursor()
+
+        for result_page in process_pdf_to_generator(temp_file_path, semester=semester):
+            for s in result_page["students"]:
+                sid = s.get("ern", "") or s.get("roll", "")
+                name = s.get("name", "")
+                status = s["ocr_result"].get("status", "UNKNOWN")
+                gpa = float(s["ocr_result"].get("gpa", 0.0))
+                screenshot = s["ocr_result"].get("screenshot", "")
+
+                # Idempotent insert: ON DUPLICATE KEY UPDATE
+                try:
+                    cursor.execute("""
+                        INSERT INTO examination_attempts
+                        (student_identifier, student_name, student_level, exam_session,
+                         semester, attempt_status, gpa, source_pdf, file_id, screenshot, exam_type)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'KT')
+                        ON DUPLICATE KEY UPDATE
+                            student_name = VALUES(student_name),
+                            attempt_status = VALUES(attempt_status),
+                            gpa = VALUES(gpa),
+                            source_pdf = VALUES(source_pdf),
+                            file_id = VALUES(file_id),
+                            screenshot = VALUES(screenshot)
+                    """, (sid, name, student_level, exam_session, semester,
+                          status.upper(), gpa, file.filename, f_id, screenshot))
+                except Exception as e:
+                    if "Duplicate" in str(e):
+                        duplicates += 1
+                    else:
+                        errors.append(f"{sid}: {str(e)}")
+
+                all_students.append({
+                    "name": name,
+                    "ern": sid,
+                    "roll": s.get("roll", ""),
+                    "exam_session": exam_session,
+                    "exam_type": "KT",
+                    "ocr_result": s["ocr_result"]
+                })
+
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        errors.append(str(e))
+    finally:
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+
+    return {
+        "success": True,
+        "count": len(all_students),
+        "duplicates": duplicates,
+        "errors": errors,
+        "students": all_students,
+        "exam_session": exam_session,
+        "semester": semester,
+        "student_level": student_level,
+        "file_id": f_id,
+    }
+
+
+@app.get("/kt-results")
+def get_kt_results(exam_session: str = None, student_level: str = None, semester: str = None):
+    """Retrieve stored KT examination attempts with optional filters."""
+    try:
+        conn = get_db_conn()
+        cursor = conn.cursor(dictionary=True)
+        query = "SELECT * FROM examination_attempts WHERE exam_type = 'KT'"
+        params = []
+        if exam_session:
+            query += " AND exam_session = %s"
+            params.append(exam_session)
+        if student_level:
+            query += " AND student_level = %s"
+            params.append(student_level)
+        if semester:
+            query += " AND semester = %s"
+            params.append(semester)
+        query += " ORDER BY created_at DESC"
+        cursor.execute(query, tuple(params))
+        rows = cursor.fetchall()
+        # Convert datetime objects to strings
+        for row in rows:
+            for k, v in row.items():
+                if isinstance(v, datetime.datetime):
+                    row[k] = v.strftime("%Y-%m-%d %H:%M:%S")
+        cursor.close()
+        conn.close()
+        return {"success": True, "results": rows, "count": len(rows)}
+    except Exception as e:
+        return {"success": False, "error": str(e), "results": []}
+
+
+@app.get("/examination-attempts")
+def get_examination_attempts(student_identifier: str = None, exam_session: str = None,
+                             student_level: str = None, exam_type: str = None):
+    """Retrieve all examination attempts with optional filters."""
+    try:
+        conn = get_db_conn()
+        cursor = conn.cursor(dictionary=True)
+        query = "SELECT * FROM examination_attempts WHERE 1=1"
+        params = []
+        if student_identifier:
+            query += " AND student_identifier = %s"
+            params.append(student_identifier)
+        if exam_session:
+            query += " AND exam_session = %s"
+            params.append(exam_session)
+        if student_level:
+            query += " AND student_level = %s"
+            params.append(student_level)
+        if exam_type:
+            query += " AND exam_type = %s"
+            params.append(exam_type)
+        query += " ORDER BY student_identifier, exam_session"
+        cursor.execute(query, tuple(params))
+        rows = cursor.fetchall()
+        for row in rows:
+            for k, v in row.items():
+                if isinstance(v, datetime.datetime):
+                    row[k] = v.strftime("%Y-%m-%d %H:%M:%S")
+        cursor.close()
+        conn.close()
+        return {"success": True, "results": rows, "count": len(rows)}
+    except Exception as e:
+        return {"success": False, "error": str(e), "results": []}
+
+
+class SyncRegularAttemptsRequest(BaseModel):
+    student_level: str = "SE"
+    exam_session: str = "FH 2026"
+    semester: str = "sem3"
+    students: Optional[List[Dict[str, Any]]] = None
+
+
+@app.post("/store-regular-attempts")
+async def store_regular_attempts(
+    req: Optional[SyncRegularAttemptsRequest] = None,
+    student_level: Optional[str] = None,
+    exam_session: Optional[str] = None,
+    semester: Optional[str] = None,
+):
+    """
+    Sync regular examination attempts into examination_attempts as REGULAR type.
+    Supports either JSON body with students or synchronizing from existing DB tables.
+    """
+    try:
+        level = (req.student_level if req else None) or student_level or "SE"
+        session_val = (req.exam_session if req else None) or exam_session or "FH 2026"
+        sem_val = (req.semester if req else None) or semester or "sem3"
+        students_list = req.students if req else None
+
+        conn = get_db_conn()
+        cursor = conn.cursor(dictionary=True)
+        imported = 0
+
+        if students_list and len(students_list) > 0:
+            for s in students_list:
+                sid = s.get("ern") or s.get("roll") or ""
+                name = s.get("name", "")
+                sem_marks = s.get("marks", {}).get(sem_val, {})
+                status = sem_marks.get("status", "UNKNOWN")
+                gpa = float(sem_marks.get("gpa", 0.0))
+                screenshot = sem_marks.get("screenshot", "")
+                if not sid:
+                    continue
+                try:
+                    cursor.execute("""
+                        INSERT INTO examination_attempts
+                        (student_identifier, student_name, student_level, exam_session,
+                         semester, attempt_status, gpa, screenshot, exam_type)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'REGULAR')
+                        ON DUPLICATE KEY UPDATE
+                            student_name = IF(VALUES(student_name) != '', VALUES(student_name), student_name),
+                            attempt_status = VALUES(attempt_status),
+                            gpa = VALUES(gpa),
+                            screenshot = IF(VALUES(screenshot) != '', VALUES(screenshot), screenshot)
+                    """, (sid, name, level, session_val, sem_val, status.upper(), gpa, screenshot))
+                    imported += 1
+                except Exception:
+                    pass
+        else:
+            # Pull from existing fe_be_results joined with student_name if possible
+            sql = """
+                SELECT f.*, COALESCE(sn.student_name, '') AS resolved_name
+                FROM fe_be_results f
+                LEFT JOIN student_name sn ON f.ern = sn.ern
+            """
+            params = []
+            if sem_val:
+                sql += " WHERE f.semester = %s"
+                params.append(sem_val)
+            cursor.execute(sql, tuple(params))
+            rows = cursor.fetchall()
+
+            for row in rows:
+                sid = row.get("ern", "")
+                name = row.get("resolved_name", "")
+                status = row.get("status", "UNKNOWN")
+                gpa = float(row.get("gpa", 0.0))
+                screenshot = row.get("screenshot", "")
+                try:
+                    cursor.execute("""
+                        INSERT INTO examination_attempts
+                        (student_identifier, student_name, student_level, exam_session,
+                         semester, attempt_status, gpa, screenshot, exam_type)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'REGULAR')
+                        ON DUPLICATE KEY UPDATE
+                            student_name = IF(VALUES(student_name) != '', VALUES(student_name), student_name),
+                            attempt_status = VALUES(attempt_status),
+                            gpa = VALUES(gpa),
+                            screenshot = IF(VALUES(screenshot) != '', VALUES(screenshot), screenshot)
+                    """, (sid, name, level, session_val, sem_val, status.upper(), gpa, screenshot))
+                    imported += 1
+                except Exception:
+                    pass
+
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return {"success": True, "imported": imported}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class ReconcileRequest(BaseModel):
+    student_level: str = "SE"
+    exam_session: Optional[str] = None
+    semester: Optional[str] = None
+
+
+
+@app.post("/reconcile")
+async def run_reconciliation(req: ReconcileRequest):
+    """
+    Run the reconciliation engine on stored examination attempts.
+    Returns summary with counts and per-student reconciliation results.
+    """
+    from reconciliation import (
+        ExaminationAttempt as RecAttempt,
+        normalize_status as rec_normalize,
+        normalize_identifier as rec_norm_id,
+        reconcile_batch as rec_batch,
+    )
+
+    try:
+        conn = get_db_conn()
+        cursor = conn.cursor(dictionary=True)
+
+        # Fetch all relevant attempts (include full history for reconciliation)
+        query = "SELECT * FROM examination_attempts WHERE student_level = %s"
+        params = [req.student_level]
+        if req.semester:
+            query += " AND semester = %s"
+            params.append(req.semester)
+        query += " ORDER BY student_identifier, exam_session"
+        cursor.execute(query, tuple(params))
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        # Convert DB rows to reconciliation objects
+        all_attempts = []
+        kt_attempts = []
+        regular_ids = set()
+
+        for row in rows:
+            att = RecAttempt(
+                attempt_id=row.get("attempt_id"),
+                student_identifier=row.get("student_identifier", ""),
+                student_name=row.get("student_name", ""),
+                student_level=row.get("student_level", ""),
+                exam_session=row.get("exam_session", ""),
+                semester=row.get("semester", ""),
+                attempt_status=rec_normalize(row.get("attempt_status", "")),
+                gpa=float(row.get("gpa", 0.0)),
+                clearance_pointer=row.get("clearance_pointer", "") or "",
+                source_pdf=row.get("source_pdf", ""),
+                file_id=row.get("file_id"),
+                exam_type=row.get("exam_type", "REGULAR"),
+            )
+            all_attempts.append(att)
+            if att.exam_type == "KT":
+                kt_attempts.append(att)
+            else:
+                regular_ids.add(rec_norm_id(att.student_identifier))
+
+        summary = rec_batch(all_attempts, kt_attempts=kt_attempts, regular_identifiers=regular_ids)
+
+        # Serialize results
+        results_data = []
+        for r in summary.results:
+            results_data.append({
+                "student_identifier": r.student_identifier,
+                "student_name": r.student_name,
+                "student_level": r.student_level,
+                "clearance_status": r.clearance_status.value,
+                "clearance_session": r.clearance_session,
+                "clearance_pointer": r.clearance_pointer,
+                "final_status": r.final_status,
+                "total_attempts": r.total_attempts,
+                "review_flags": r.review_flags,
+                "attempts": [
+                    {
+                        "exam_session": a.exam_session,
+                        "semester": a.semester,
+                        "attempt_status": a.attempt_status.value,
+                        "gpa": a.gpa,
+                        "exam_type": a.exam_type,
+                        "source_pdf": a.source_pdf,
+                        "clearance_pointer": a.clearance_pointer,
+                    }
+                    for a in r.attempts
+                ]
+            })
+
+        exceptions_data = []
+        for e in summary.exceptions:
+            exceptions_data.append({
+                "student_identifier": e.student_identifier,
+                "student_name": e.student_name,
+                "exception_type": e.exception_type.value,
+                "description": e.description,
+                "action_required": e.action_required,
+            })
+
+        return {
+            "success": True,
+            "summary": {
+                "total_students": summary.total_students,
+                "pass_count": summary.pass_count,
+                "fail_count": summary.fail_count,
+                "cleared_count": summary.cleared_count,
+                "uncleared_count": summary.uncleared_count,
+                "pending_count": summary.pending_count,
+                "duplicate_count": summary.duplicate_count,
+                "conflict_count": summary.conflict_count,
+                "unmatched_kt_count": summary.unmatched_kt_count,
+                "needs_review_count": summary.needs_review_count,
+                "session_counts": summary.session_counts,
+            },
+            "results": results_data,
+            "exceptions": exceptions_data,
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/generate-final-output")
+async def generate_final_output(req: ReconcileRequest):
+    """
+    Run reconciliation and generate a downloadable Excel workbook with three sheets:
+      1. Consolidated Results
+      2. Examination Attempt History
+      3. Exceptions and Validation
+    """
+    from reconciliation import (
+        ExaminationAttempt as RecAttempt,
+        normalize_status as rec_normalize,
+        normalize_identifier as rec_norm_id,
+        reconcile_batch as rec_batch,
+    )
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    try:
+        conn = get_db_conn()
+        cursor = conn.cursor(dictionary=True)
+
+        query = "SELECT * FROM examination_attempts WHERE student_level = %s"
+        params = [req.student_level]
+        if req.semester:
+            query += " AND semester = %s"
+            params.append(req.semester)
+        query += " ORDER BY student_identifier, exam_session"
+        cursor.execute(query, tuple(params))
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        # Build attempt objects
+        all_attempts = []
+        kt_attempts = []
+        regular_ids = set()
+
+        for row in rows:
+            att = RecAttempt(
+                attempt_id=row.get("attempt_id"),
+                student_identifier=row.get("student_identifier", ""),
+                student_name=row.get("student_name", ""),
+                student_level=row.get("student_level", ""),
+                exam_session=row.get("exam_session", ""),
+                semester=row.get("semester", ""),
+                attempt_status=rec_normalize(row.get("attempt_status", "")),
+                gpa=float(row.get("gpa", 0.0)),
+                clearance_pointer=row.get("clearance_pointer", "") or "",
+                source_pdf=row.get("source_pdf", ""),
+                file_id=row.get("file_id"),
+                exam_type=row.get("exam_type", "REGULAR"),
+            )
+            all_attempts.append(att)
+            if att.exam_type == "KT":
+                kt_attempts.append(att)
+            else:
+                regular_ids.add(rec_norm_id(att.student_identifier))
+
+        summary = rec_batch(all_attempts, kt_attempts=kt_attempts, regular_identifiers=regular_ids)
+
+        # --- Build Excel workbook ---
+        wb = openpyxl.Workbook()
+
+        # Styles
+        header_font = Font(name="Calibri", bold=True, size=11, color="FFFFFF")
+        header_fill = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
+        title_font = Font(name="Calibri", bold=True, size=14, color="1F4E79")
+        subtitle_font = Font(name="Calibri", bold=True, size=10, color="555555")
+        pass_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+        fail_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+        review_fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
+        thin_border = Border(
+            left=Side(style="thin"), right=Side(style="thin"),
+            top=Side(style="thin"), bottom=Side(style="thin"),
+        )
+
+        # --- Sheet 1: Consolidated Results ---
+        ws1 = wb.active
+        ws1.title = "Consolidated Results"
+        ws1.append([f"{req.student_level} CONSOLIDATED RESULTS"])
+        ws1.merge_cells("A1:L1")
+        ws1["A1"].font = title_font
+        ws1.append([f"Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"])
+        ws1["A2"].font = subtitle_font
+        ws1.append([])
+
+        consol_headers = [
+            "Student ID", "Student Name", "Level",
+            "Original Exam Session", "Original Status", "Original GPA",
+            "Subsequent Exam Session", "Subsequent Status", "Subsequent GPA",
+            "Clearance Status", "Clearance Session", "Clearance Pointer",
+            "Final Consolidated Status", "Total Attempts", "Review Flags"
+        ]
+        ws1.append(consol_headers)
+        for col_num, hdr in enumerate(consol_headers, 1):
+            cell = ws1.cell(row=4, column=col_num)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal="center", wrap_text=True)
+            cell.border = thin_border
+
+        for r_idx, rec in enumerate(summary.results, 5):
+            sorted_atts = rec.attempts
+            orig = sorted_atts[0] if sorted_atts else None
+            subseq = sorted_atts[1] if len(sorted_atts) > 1 else None
+
+            row_data = [
+                rec.student_identifier,
+                rec.student_name,
+                rec.student_level,
+                orig.exam_session if orig else "",
+                orig.attempt_status.value if orig else "",
+                orig.gpa if orig else "",
+                subseq.exam_session if subseq else "",
+                subseq.attempt_status.value if subseq else "",
+                subseq.gpa if subseq else "",
+                rec.clearance_status.value,
+                rec.clearance_session,
+                rec.clearance_pointer,
+                rec.final_status,
+                rec.total_attempts,
+                "; ".join(rec.review_flags) if rec.review_flags else "",
+            ]
+            ws1.append(row_data)
+
+            # Color-code clearance status
+            status_cell = ws1.cell(row=r_idx, column=10)
+            status_cell.border = thin_border
+            cs = rec.clearance_status.value
+            if cs in ("PASSED_ORIGINAL", "CLEARED_SUBSEQUENTLY"):
+                status_cell.fill = pass_fill
+            elif cs in ("UNCLEARED", "PENDING"):
+                status_cell.fill = fail_fill
+            else:
+                status_cell.fill = review_fill
+
+            for col_num in range(1, len(row_data) + 1):
+                ws1.cell(row=r_idx, column=col_num).border = thin_border
+
+        # Auto-width
+        for col in ws1.columns:
+            max_length = 0
+            col_letter = get_column_letter(col[0].column)
+            for cell in col:
+                try:
+                    if cell.value:
+                        max_length = max(max_length, len(str(cell.value)))
+                except Exception:
+                    pass
+            ws1.column_dimensions[col_letter].width = min(max_length + 4, 40)
+        ws1.auto_filter.ref = f"A4:{get_column_letter(len(consol_headers))}{ws1.max_row}"
+        ws1.freeze_panes = "A5"
+
+        # --- Sheet 2: Examination Attempt History ---
+        ws2 = wb.create_sheet("Attempt History")
+        hist_headers = [
+            "Student ID", "Student Name", "Level",
+            "Exam Session", "Semester", "Status", "GPA",
+            "Exam Type", "Source PDF", "Clearance Pointer",
+            "File ID", "Record Timestamp"
+        ]
+        ws2.append(hist_headers)
+        for col_num, hdr in enumerate(hist_headers, 1):
+            cell = ws2.cell(row=1, column=col_num)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal="center", wrap_text=True)
+            cell.border = thin_border
+
+        for row in rows:
+            created = row.get("created_at", "")
+            if isinstance(created, datetime.datetime):
+                created = created.strftime("%Y-%m-%d %H:%M:%S")
+            ws2.append([
+                row.get("student_identifier", ""),
+                row.get("student_name", ""),
+                row.get("student_level", ""),
+                row.get("exam_session", ""),
+                row.get("semester", ""),
+                row.get("attempt_status", ""),
+                row.get("gpa", 0),
+                row.get("exam_type", ""),
+                row.get("source_pdf", ""),
+                row.get("clearance_pointer", ""),
+                row.get("file_id", ""),
+                created,
+            ])
+
+        for col in ws2.columns:
+            max_length = 0
+            col_letter = get_column_letter(col[0].column)
+            for cell in col:
+                try:
+                    if cell.value:
+                        max_length = max(max_length, len(str(cell.value)))
+                except Exception:
+                    pass
+            ws2.column_dimensions[col_letter].width = min(max_length + 4, 40)
+        ws2.auto_filter.ref = f"A1:{get_column_letter(len(hist_headers))}{ws2.max_row}"
+        ws2.freeze_panes = "A2"
+
+        # --- Sheet 3: Exceptions and Validation ---
+        ws3 = wb.create_sheet("Exceptions")
+        exc_headers = [
+            "Student ID", "Student Name", "Exception Type",
+            "Description", "Action Required"
+        ]
+        ws3.append(exc_headers)
+        for col_num, hdr in enumerate(exc_headers, 1):
+            cell = ws3.cell(row=1, column=col_num)
+            cell.font = header_font
+            cell.fill = PatternFill(start_color="C00000", end_color="C00000", fill_type="solid")
+            cell.alignment = Alignment(horizontal="center", wrap_text=True)
+            cell.border = thin_border
+
+        if summary.exceptions:
+            for exc in summary.exceptions:
+                ws3.append([
+                    exc.student_identifier,
+                    exc.student_name,
+                    exc.exception_type.value,
+                    exc.description,
+                    exc.action_required,
+                ])
+        else:
+            ws3.append(["", "", "", "No exceptions detected", ""])
+
+        for col in ws3.columns:
+            max_length = 0
+            col_letter = get_column_letter(col[0].column)
+            for cell in col:
+                try:
+                    if cell.value:
+                        max_length = max(max_length, len(str(cell.value)))
+                except Exception:
+                    pass
+            ws3.column_dimensions[col_letter].width = min(max_length + 4, 50)
+        ws3.auto_filter.ref = f"A1:{get_column_letter(len(exc_headers))}{ws3.max_row}"
+        ws3.freeze_panes = "A2"
+
+        # Save to buffer
+        output_buffer = io.BytesIO()
+        wb.save(output_buffer)
+        output_buffer.seek(0)
+
+        filename = f"{req.student_level}_Consolidated_Results_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        add_db_log("System", "Final Output", f"Generated {filename} with {summary.total_students} students")
+
+        return StreamingResponse(
+            output_buffer,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 if __name__ == "__main__":
     import uvicorn
