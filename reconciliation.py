@@ -285,6 +285,8 @@ def reconcile_student(attempts: List[ExaminationAttempt]) -> ReconciliationResul
             result.clearance_pointer = clearing_attempt.clearance_pointer
         elif first_attempt.clearance_pointer:
             result.clearance_pointer = first_attempt.clearance_pointer
+        elif clearing_attempt.gpa > 0:
+            result.clearance_pointer = f"{clearing_attempt.gpa:.2f}"
         result.final_status = (
             f"Failed in {first_attempt.exam_session}; "
             f"cleared in {clearing_attempt.exam_session}"

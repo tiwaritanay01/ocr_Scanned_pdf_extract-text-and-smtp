@@ -979,6 +979,7 @@ async def upload_kt(
         raise HTTPException(status_code=400, detail="Only PDF allowed")
 
     f_id = track_file_upload(file.filename, user_name, "PDF")
+    print(f"\n[KT Upload] Received {file.filename} (Level: {student_level}, Semester: {semester}, Session: {exam_session}) from {user_name}")
     add_db_log(user_name, "KT Upload", f"Processing KT file {file.filename} for {exam_session} {semester}")
 
     file_id = str(uuid.uuid4())
@@ -986,58 +987,165 @@ async def upload_kt(
     with open(temp_file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    from FE_BE import process_pdf_to_generator
-
     all_students = []
     duplicates = 0
     errors = []
+    raw_students = []
+
+    level_norm = (student_level or "SE").strip().upper()
+    is_fe_be = level_norm in ("FE", "BE") or semester in ("sem1", "sem2", "sem7", "sem8")
+
+    if is_fe_be:
+        # FE and BE Format: Specifically trigger 7-digit detection engine
+        try:
+            from FE_BE import process_pdf_to_generator
+            for result_page in process_pdf_to_generator(temp_file_path, semester=semester):
+                for s in result_page.get("students", []):
+                    raw_students.append({
+                        "sid": s.get("ern", "") or s.get("roll", "") or s.get("name", ""),
+                        "name": s.get("name", ""),
+                        "roll": s.get("roll", ""),
+                        "status": s.get("ocr_result", {}).get("status", "UNKNOWN"),
+                        "gpa": float(s.get("ocr_result", {}).get("gpa", 0.0)),
+                        "screenshot": s.get("ocr_result", {}).get("screenshot", ""),
+                    })
+        except Exception as e:
+            errors.append(f"FE/BE 7-digit scan error: {e}")
+    else:
+        # SE and TE Format: Strictly trigger general marksheet scan (7-digit logic does not trigger)
+        try:
+            from general_marks_scan import process_marksheet_iter
+            for page_data in process_marksheet_iter(temp_file_path):
+                for s in page_data.get("students", []):
+                    raw_students.append({
+                        "sid": s.get("ern", "") or s.get("roll", "") or s.get("name", ""),
+                        "name": s.get("name", ""),
+                        "roll": s.get("roll", ""),
+                        "status": s.get("status", "UNKNOWN"),
+                        "gpa": float(s.get("gpa", 0.0)),
+                        "screenshot": "",
+                    })
+        except Exception as e:
+            errors.append(f"SE/TE marksheet scan error: {e}")
+
     try:
         conn = get_db_conn()
-        cursor = conn.cursor()
+        cursor = conn.cursor(dictionary=True)
 
-        for result_page in process_pdf_to_generator(temp_file_path, semester=semester):
-            for s in result_page["students"]:
-                sid = s.get("ern", "") or s.get("roll", "")
-                name = s.get("name", "")
-                status = s["ocr_result"].get("status", "UNKNOWN")
-                gpa = float(s["ocr_result"].get("gpa", 0.0))
-                screenshot = s["ocr_result"].get("screenshot", "")
+        # 1. Fetch existing attempts for this level and semester to identify failed candidates
+        cursor.execute("""
+            SELECT student_identifier, student_name, gpa, exam_session, attempt_status
+            FROM examination_attempts
+            WHERE student_level = %s AND semester = %s
+        """, (student_level, semester))
+        existing_sem_records = cursor.fetchall()
 
-                # Idempotent insert: ON DUPLICATE KEY UPDATE
-                try:
-                    cursor.execute("""
-                        INSERT INTO examination_attempts
-                        (student_identifier, student_name, student_level, exam_session,
-                         semester, attempt_status, gpa, source_pdf, file_id, screenshot, exam_type)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'KT')
-                        ON DUPLICATE KEY UPDATE
-                            student_name = VALUES(student_name),
-                            attempt_status = VALUES(attempt_status),
-                            gpa = VALUES(gpa),
-                            source_pdf = VALUES(source_pdf),
-                            file_id = VALUES(file_id),
-                            screenshot = VALUES(screenshot)
-                    """, (sid, name, student_level, exam_session, semester,
-                          status.upper(), gpa, file.filename, f_id, screenshot))
-                except Exception as e:
-                    if "Duplicate" in str(e):
-                        duplicates += 1
+        failed_candidates = [
+            r for r in existing_sem_records 
+            if (r.get("attempt_status") or "").upper() in ("FAIL", "F", "FAILED", "UNSUCCESSFUL")
+        ]
+        passed_identifiers = {
+            str(r.get("student_identifier", "")).strip().upper() 
+            for r in existing_sem_records 
+            if (r.get("attempt_status") or "").upper() in ("PASS", "P", "SUCCESS", "SUCCESSFUL", "PASSED")
+        }
+        passed_names = {
+            " ".join(str(r.get("student_name", "")).upper().split()) 
+            for r in existing_sem_records 
+            if (r.get("attempt_status") or "").upper() in ("PASS", "P", "SUCCESS", "SUCCESSFUL", "PASSED")
+        }
+
+        import difflib
+        def match_failed_candidate(c_name, c_sid, failed_list):
+            name_clean = " ".join(str(c_name or "").upper().split())
+            sid_clean = str(c_sid or "").strip().upper()
+            for f in failed_list:
+                f_sid = str(f.get("student_identifier", "")).strip().upper()
+                f_name = " ".join(str(f.get("student_name", "")).upper().split())
+                if f_sid and (f_sid == sid_clean or f_sid in name_clean or sid_clean in f_sid):
+                    return f
+                if f_name and (f_name == name_clean or f_name in name_clean or name_clean in f_name):
+                    return f
+                if f_name and difflib.SequenceMatcher(None, f_name, name_clean).ratio() > 0.82:
+                    return f
+            return None
+
+        for s in raw_students:
+            sid = s["sid"] or s["name"]
+            name = s["name"]
+            raw_st = (s["status"] or "UNKNOWN").upper()
+            if raw_st in ("P", "PASS", "SUCCESS", "SUCCESSFUL", "PASSED"):
+                norm_status = "PASS"
+            elif raw_st in ("F", "FAIL", "FAILED", "UNSUCCESSFUL"):
+                norm_status = "FAIL"
+            else:
+                norm_status = raw_st
+            gpa = s["gpa"]
+            screenshot = s["screenshot"]
+            pointer = f"{gpa:.2f}" if (norm_status == "PASS" and gpa > 0) else ""
+
+            # Check if there are known failed candidates in DB for this semester
+            if failed_candidates:
+                matched_fc = match_failed_candidate(name, sid, failed_candidates)
+                if matched_fc:
+                    # Matched an authentic failed candidate sitting for KT!
+                    sid = matched_fc.get("student_identifier") or sid
+                    name = matched_fc.get("student_name") or name
+                    print(f"[KT Upload] Matched failed candidate: {name} ({sid}) -> {norm_status} ({gpa})")
+                else:
+                    # Student wasn't in the failed list.
+                    # If they already passed this semester regularly, skip adding a redundant KT attempt
+                    name_norm = " ".join(str(name).upper().split())
+                    sid_norm = str(sid).strip().upper()
+                    if sid_norm in passed_identifiers or name_norm in passed_names:
+                        print(f"[KT Upload] Skipping {name}: already passed regular examination for {semester}")
+                        continue
                     else:
-                        errors.append(f"{sid}: {str(e)}")
+                        print(f"[KT Upload] Unmatched KT candidate: {name} ({sid})")
 
-                all_students.append({
-                    "name": name,
-                    "ern": sid,
-                    "roll": s.get("roll", ""),
-                    "exam_session": exam_session,
-                    "exam_type": "KT",
-                    "ocr_result": s["ocr_result"]
-                })
+            # Idempotent insert: ON DUPLICATE KEY UPDATE
+            try:
+                cursor.execute("""
+                    INSERT INTO examination_attempts
+                    (student_identifier, student_name, student_level, exam_session,
+                     semester, attempt_status, gpa, clearance_pointer, source_pdf, file_id, screenshot, exam_type)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'KT')
+                    ON DUPLICATE KEY UPDATE
+                        student_name = VALUES(student_name),
+                        attempt_status = VALUES(attempt_status),
+                        gpa = VALUES(gpa),
+                        clearance_pointer = VALUES(clearance_pointer),
+                        source_pdf = VALUES(source_pdf),
+                        file_id = VALUES(file_id),
+                        screenshot = VALUES(screenshot)
+                """, (sid, name, student_level, exam_session, semester,
+                      norm_status, gpa, pointer, file.filename, f_id, screenshot))
+            except Exception as e:
+                if "Duplicate" in str(e):
+                    duplicates += 1
+                else:
+                    errors.append(f"{sid}: {str(e)}")
+
+            all_students.append({
+                "name": name,
+                "ern": sid,
+                "roll": s.get("roll", ""),
+                "exam_session": exam_session,
+                "exam_type": "KT",
+                "ocr_result": {
+                    "gpa": gpa,
+                    "status": norm_status,
+                    "clearance_pointer": pointer,
+                    "screenshot": screenshot
+                }
+            })
 
         conn.commit()
         cursor.close()
         conn.close()
+        print(f"[KT Upload] Successfully saved {len(all_students)} KT attempt(s) into database.")
     except Exception as e:
+        print(f"[KT Upload Error] {e}")
         errors.append(str(e))
     finally:
         if os.path.exists(temp_file_path):
@@ -1153,10 +1261,27 @@ async def store_regular_attempts(
 
         if students_list and len(students_list) > 0:
             for s in students_list:
-                sid = s.get("ern") or s.get("roll") or ""
-                name = s.get("name", "")
+                name = (s.get("name") or "").strip()
+                raw_ern = str(s.get("ern") or "").strip()
+                raw_roll = str(s.get("roll") or "").strip()
+
+                if raw_ern and raw_ern.upper() not in ("N/A", "NONE", "NULL"):
+                    sid = raw_ern
+                elif raw_roll and raw_roll.upper() not in ("N/A", "NONE", "NULL"):
+                    sid = raw_roll
+                else:
+                    sid = name or ""
+
                 sem_marks = s.get("marks", {}).get(sem_val, {})
                 status = sem_marks.get("status", "UNKNOWN")
+                raw_st = str(status or "").upper().strip()
+                if raw_st in ("P", "PASS", "SUCCESS", "SUCCESSFUL", "PASSED"):
+                    norm_status = "PASS"
+                elif raw_st in ("F", "FAIL", "FAILED", "UNSUCCESSFUL"):
+                    norm_status = "FAIL"
+                else:
+                    norm_status = raw_st or "UNKNOWN"
+
                 gpa = float(sem_marks.get("gpa", 0.0))
                 screenshot = sem_marks.get("screenshot", "")
                 if not sid:
@@ -1172,10 +1297,10 @@ async def store_regular_attempts(
                             attempt_status = VALUES(attempt_status),
                             gpa = VALUES(gpa),
                             screenshot = IF(VALUES(screenshot) != '', VALUES(screenshot), screenshot)
-                    """, (sid, name, level, session_val, sem_val, status.upper(), gpa, screenshot))
+                    """, (sid, name, level, session_val, sem_val, norm_status, gpa, screenshot))
                     imported += 1
-                except Exception:
-                    pass
+                except Exception as ex:
+                    print(f"[store_regular_attempts Insert Error] {ex}")
         else:
             # Pull from existing fe_be_results joined with student_name if possible
             sql = """
@@ -1220,6 +1345,12 @@ async def store_regular_attempts(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/seed-demo-kt")
+async def seed_demo_kt_endpoint():
+    """Demo seeding permanently disabled to preserve real student database."""
+    return {"success": False, "message": "Demo seeding has been permanently disabled."}
+
+
 class ReconcileRequest(BaseModel):
     student_level: str = "SE"
     exam_session: Optional[str] = None
@@ -1244,8 +1375,14 @@ async def run_reconciliation(req: ReconcileRequest):
         conn = get_db_conn()
         cursor = conn.cursor(dictionary=True)
 
-        # Fetch all relevant attempts (include full history for reconciliation)
-        query = "SELECT * FROM examination_attempts WHERE student_level = %s"
+        # Fetch all relevant attempts (exclude any seeded dummy records)
+        query = """
+            SELECT * FROM examination_attempts 
+            WHERE student_level = %s
+              AND student_identifier NOT LIKE 'MU%%'
+              AND student_identifier NOT LIKE 'TE-%%'
+              AND student_name NOT IN ('Tanay Tiwari', 'Aditi Rao', 'Vihaan Kumar', 'Ananya Mishra', 'Arjun Reddy', 'MHATRE NISHANT SURENDRA', 'Sanya Mehta', 'Rohan Deshmukh', 'Kabir Verma')
+        """
         params = [req.student_level]
         if req.semester:
             query += " AND semester = %s"
@@ -1367,7 +1504,13 @@ async def generate_final_output(req: ReconcileRequest):
         conn = get_db_conn()
         cursor = conn.cursor(dictionary=True)
 
-        query = "SELECT * FROM examination_attempts WHERE student_level = %s"
+        query = """
+            SELECT * FROM examination_attempts 
+            WHERE student_level = %s
+              AND student_identifier NOT LIKE 'MU%%'
+              AND student_identifier NOT LIKE 'TE-%%'
+              AND student_name NOT IN ('Tanay Tiwari', 'Aditi Rao', 'Vihaan Kumar', 'Ananya Mishra', 'Arjun Reddy', 'MHATRE NISHANT SURENDRA', 'Sanya Mehta', 'Rohan Deshmukh', 'Kabir Verma')
+        """
         params = [req.student_level]
         if req.semester:
             query += " AND semester = %s"
@@ -1585,6 +1728,221 @@ async def generate_final_output(req: ReconcileRequest):
             ws3.column_dimensions[col_letter].width = min(max_length + 4, 50)
         ws3.auto_filter.ref = f"A1:{get_column_letter(len(exc_headers))}{ws3.max_row}"
         ws3.freeze_panes = "A2"
+
+        # --- Sheet 4: Sem 1 to Sem 8 Progression & Clearance Analysis ---
+        ws4 = wb.create_sheet("Sem 1-8 Analysis")
+        ws4.append(["SEMESTER 1 TO 8 CLEARANCE & PROGRESSION ANALYSIS"])
+        ws4.merge_cells("A1:L1")
+        ws4["A1"].font = title_font
+        ws4.append(["University Examination History & KT Clearance Matrix Across Semesters 1 - 8"])
+        ws4["A2"].font = subtitle_font
+        ws4.append([])
+
+        matrix_headers = [
+            "Student ID", "Student Name", "Level",
+            "sem 1", "sem 2", "sem 3", "sem 4", "sem 5", "sem 6", "sem 7", "sem 8",
+            "Current Backlogs"
+        ]
+        ws4.append(matrix_headers)
+        for col_num, hdr in enumerate(matrix_headers, 1):
+            cell = ws4.cell(row=4, column=col_num)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            cell.border = thin_border
+        ws4.row_dimensions[4].height = 26
+
+        # Fetch multi-semester attempts for all relevant students
+        sids = list({r.student_identifier for r in summary.results if r.student_identifier})
+        conn_multi = get_db_conn()
+        cur_multi = conn_multi.cursor(dictionary=True)
+
+        if sids:
+            format_strings = ','.join(['%s'] * len(sids))
+            cur_multi.execute(
+                f"SELECT * FROM examination_attempts WHERE student_identifier IN ({format_strings}) ORDER BY student_identifier, semester, created_at",
+                tuple(sids)
+            )
+            multi_rows = cur_multi.fetchall()
+        else:
+            multi_rows = []
+        cur_multi.close()
+        conn_multi.close()
+
+        def format_sess_short(s):
+            if not s:
+                return ""
+            import re
+            m = re.search(r'(FH|SH)\s*(\d{2,4})', str(s), re.IGNORECASE)
+            if m:
+                term = m.group(1).upper()
+                yr = m.group(2)
+                if len(yr) == 4:
+                    yr = yr[-2:]
+                return f"{term}{yr}"
+            return str(s).strip()
+
+        students_dict = {}
+        for rec in summary.results:
+            students_dict[rec.student_identifier] = {
+                "name": rec.student_name,
+                "level": rec.student_level,
+                "attempts": []
+            }
+
+        for row_m in multi_rows:
+            sid = row_m.get("student_identifier", "")
+            if sid not in students_dict:
+                students_dict[sid] = {
+                    "name": row_m.get("student_name", ""),
+                    "level": row_m.get("student_level", ""),
+                    "attempts": []
+                }
+            students_dict[sid]["attempts"].append(row_m)
+
+        pass_matrix_fill = PatternFill(start_color="E2F0D9", end_color="E2F0D9", fill_type="solid")
+        pass_matrix_font = Font(name="Calibri", size=10, color="276A3C", bold=False)
+        cleared_matrix_fill = PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid")
+        cleared_matrix_font = Font(name="Calibri", size=10, color="1F4E79", bold=True)
+        fail_matrix_fill = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+        fail_matrix_font = Font(name="Calibri", size=10, color="C00000", bold=True)
+
+        row_m_idx = 5
+        for sid, sinfo in students_dict.items():
+            name = sinfo.get("name", "")
+            lvl = sinfo.get("level", "")
+            atts = sinfo.get("attempts", [])
+
+            sem_map = {f"sem{i}": [] for i in range(1, 9)}
+            for a in atts:
+                raw_sem = str(a.get("semester", "")).lower().replace(" ", "").replace("_", "")
+                for i in range(1, 9):
+                    if raw_sem in (f"sem{i}", f"semester{i}", str(i)):
+                        sem_map[f"sem{i}"].append(a)
+                        break
+
+            # Check KT clearances to detect "passed FH26 and sem3 in FH26"
+            cleared_in_session = {}
+            for s_key, att_list in sem_map.items():
+                for a in att_list:
+                    if a.get("exam_type", "").upper() == "KT" and a.get("attempt_status", "").upper() == "PASS":
+                        sess_short = format_sess_short(a.get("exam_session", ""))
+                        if sess_short:
+                            cleared_in_session.setdefault(sess_short, []).append(s_key)
+
+            sem_cells = []
+            pending_backlogs = []
+
+            for i in range(1, 9):
+                s_key = f"sem{i}"
+                att_list = sem_map[s_key]
+                if not att_list:
+                    sem_cells.append({"text": "", "type": "empty"})
+                    continue
+
+                regs = [a for a in att_list if a.get("exam_type", "").upper() != "KT"]
+                kts = [a for a in att_list if a.get("exam_type", "").upper() == "KT"]
+
+                reg_att = regs[0] if regs else None
+                last_kt = kts[-1] if kts else None
+
+                reg_status = (reg_att.get("attempt_status", "") if reg_att else "").upper()
+                reg_session = format_sess_short(reg_att.get("exam_session", "")) if reg_att else ""
+
+                cleared_earlier = cleared_in_session.get(reg_session, [])
+                cleared_earlier_other = [s for s in cleared_earlier if s != s_key]
+
+                cell_text = ""
+                cell_type = "empty"
+
+                if reg_status == "PASS":
+                    cell_text = f"passed {reg_session}"
+                    cell_type = "pass"
+                    if cleared_earlier_other:
+                        cleared_str = ", ".join(cleared_earlier_other)
+                        cell_text += f" and {cleared_str} in {reg_session}"
+                        cell_type = "cleared"
+                elif reg_status == "FAIL":
+                    if last_kt and last_kt.get("attempt_status", "").upper() == "PASS":
+                        kt_sess = format_sess_short(last_kt.get("exam_session", ""))
+                        cell_text = f"failed {reg_session}; cleared in {kt_sess}"
+                        cell_type = "cleared"
+                    elif last_kt and last_kt.get("attempt_status", "").upper() == "FAIL":
+                        kt_sess = format_sess_short(last_kt.get("exam_session", ""))
+                        cell_text = f"failed {reg_session}; failed KT in {kt_sess}"
+                        cell_type = "fail"
+                        pending_backlogs.append(s_key)
+                    else:
+                        cell_text = f"failed {reg_session}"
+                        cell_type = "fail"
+                        pending_backlogs.append(s_key)
+                elif last_kt:
+                    kt_sess = format_sess_short(last_kt.get("exam_session", ""))
+                    if last_kt.get("attempt_status", "").upper() == "PASS":
+                        cell_text = f"cleared in {kt_sess}"
+                        cell_type = "cleared"
+                    else:
+                        cell_text = f"failed KT in {kt_sess}"
+                        cell_type = "fail"
+                        pending_backlogs.append(s_key)
+                else:
+                    cell_text = ""
+                    cell_type = "empty"
+
+                sem_cells.append({"text": cell_text, "type": cell_type})
+
+            backlog_text = "Clear" if not pending_backlogs else f"KT in {', '.join(pending_backlogs).upper()}"
+
+            row_data = [sid, name, lvl] + [c["text"] for c in sem_cells] + [backlog_text]
+            ws4.append(row_data)
+            ws4.row_dimensions[row_m_idx].height = 24
+
+            for col_idx, c_info in enumerate(sem_cells, 4):
+                cell = ws4.cell(row=row_m_idx, column=col_idx)
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                cell.border = thin_border
+                if c_info["type"] == "pass":
+                    cell.fill = pass_matrix_fill
+                    cell.font = pass_matrix_font
+                elif c_info["type"] == "cleared":
+                    cell.fill = cleared_matrix_fill
+                    cell.font = cleared_matrix_font
+                elif c_info["type"] == "fail":
+                    cell.fill = fail_matrix_fill
+                    cell.font = fail_matrix_font
+
+            # Style ID, Name, Level, and Backlog
+            for c_pos in (1, 2, 3):
+                c_cell = ws4.cell(row=row_m_idx, column=c_pos)
+                c_cell.border = thin_border
+                c_cell.alignment = Alignment(horizontal="left" if c_pos == 2 else "center", vertical="center")
+                c_cell.font = Font(name="Calibri", bold=(c_pos != 3), size=10)
+
+            bk_cell = ws4.cell(row=row_m_idx, column=len(matrix_headers))
+            bk_cell.border = thin_border
+            bk_cell.alignment = Alignment(horizontal="center", vertical="center")
+            if pending_backlogs:
+                bk_cell.fill = fail_matrix_fill
+                bk_cell.font = fail_matrix_font
+            else:
+                bk_cell.fill = pass_matrix_fill
+                bk_cell.font = pass_matrix_font
+
+            row_m_idx += 1
+
+        for col in ws4.columns:
+            max_len = 0
+            col_let = get_column_letter(col[0].column)
+            for cell in col:
+                try:
+                    if cell.value:
+                        max_len = max(max_len, len(str(cell.value)))
+                except Exception:
+                    pass
+            ws4.column_dimensions[col_let].width = max(min(max_len + 4, 38), 12)
+
+        ws4.auto_filter.ref = f"A4:{get_column_letter(len(matrix_headers))}{ws4.max_row}"
+        ws4.freeze_panes = "D5"
 
         # Save to buffer
         output_buffer = io.BytesIO()

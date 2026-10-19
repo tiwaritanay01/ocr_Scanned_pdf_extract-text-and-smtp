@@ -140,13 +140,6 @@ export default function Login() {
                             )}
                         </button>
                     </form>
-
-                    <div className="mt-10 pt-8 border-t border-slate-100 dark:border-slate-800 text-center">
-                        <p className="text-xs text-slate-400 dark:text-slate-500 flex items-center justify-center gap-2">
-                            <ShieldCheck className="w-4 h-4" />
-                            Secure Enterprise Authentication v2.0
-                        </p>
-                    </div>
                 </div>
             </div>
         </div>

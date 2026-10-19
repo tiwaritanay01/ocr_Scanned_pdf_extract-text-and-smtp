@@ -187,22 +187,22 @@ def fuzzy_match_entity(candidate, known_names, cutoff=0.55):
 
 
 def ocr_upscaled(roi, psm=6):
-    """Upscale small ROI for better OCR accuracy."""
+    """Upscale small ROI for better OCR accuracy with fast linear interpolation."""
     if roi is None or roi.size == 0:
         return ""
     h, w = roi.shape[:2]
 
-    # Upscale if too small
-    if h < 200:
-        scale = 200 / h
-        roi = cv2.resize(roi, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
+    # Moderate upscale if too small (avoid massive 8x blowups that stall Tesseract)
+    if h < 55:
+        scale = min(2.5, 75.0 / max(h, 1))
+        roi = cv2.resize(roi, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_LINEAR)
 
     if len(roi.shape) == 3:
         roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
 
     # Truly empty region check
     mean_val = np.mean(roi)
-    if mean_val > 250:
+    if mean_val > 252:
         return ""
 
     text = pytesseract.image_to_string(roi, config=f"--psm {psm}").strip()
@@ -211,25 +211,38 @@ def ocr_upscaled(roi, psm=6):
 
 def parse_marks_box(text):
     """
-    Robust marks extraction: Find the last valid float in the GPA range.
-    User tip: GPA is at right-bottom of P status.
+    Robust marks extraction: Find the last valid float or triplet in the GPA range.
+    Handles standard floats, gazette (EC ECG GPA) triplets, and integer GPAs.
     """
-    # Clean text: normalize commas, dots
-    text = text.upper().replace(',', '.')
+    text_clean = text.upper().replace(',', '.')
 
     # 1. Fail Status Detection (strict word boundaries)
-    if re.search(r'\bFAIL\b|\bATKT\b|NULL|^F$|[(]F[)]|\sF\s', text):
+    if re.search(r'\bFAIL\b|\bATKT\b|NULL|^F$|[(]F[)]|\sF\s', text_clean):
         return 0.0, "F"
 
     # 2. Extract Floats: look for patterns like 8.50, 9.1, 10.00
-    matches = re.findall(r"(\d{1,2}\.\d{1,2})", text)
+    matches = re.findall(r"(\d{1,2}\.\d{1,2})", text_clean)
     if matches:
-        # Take the last valid float in range (user tip: bottom-right)
         for num in reversed(matches):
             try:
                 val = float(num)
                 if 4.0 <= val <= 10.0:
                     return val, "P"
+            except:
+                continue
+
+    # 3. Look for Gazette EC ECG GPA triplet: e.g. "24 168 7" or "24 204 8.5"
+    triplet = re.findall(r"\b(2[0-8])\s+(\d{2,3})\b(?:\s+(\d{1,2}(?:\.\d{1,2})?))?", text_clean)
+    if triplet:
+        for ec, ecg, gpa_str in reversed(triplet):
+            try:
+                if gpa_str:
+                    g_val = float(gpa_str)
+                    if 4.0 <= g_val <= 10.0:
+                        return round(g_val, 2), "P"
+                calc = float(ecg) / float(ec)
+                if 4.0 <= calc <= 10.0:
+                    return round(calc, 2), "P"
             except:
                 continue
 
@@ -248,25 +261,26 @@ def find_name_and_result_columns(x_bounds, img_width):
         # Fallback to percentage-based
         return int(img_width * 0.05), int(img_width * 0.20), int(img_width * 0.65)
 
-    # Heuristic: The name column is the WIDEST column in the left half.
-    # In most marksheets: Col0=SrNo(narrow), Col1=Name(wide), Col2+=Subjects
-    # But some pages have an extra thin left border column.
+    # The Student Name column is ALWAYS in the left portion of the page (starts before 0.18*w and ends before 0.35*w)
+    max_name_end = int(img_width * 0.35)
+    min_col_width = max(80, int(img_width * 0.045))
+    valid_candidates = []
 
-    # Find the widest gap in the first 5 columns
-    best_gap = 0
-    best_start_idx = 1  # Default: column 1
+    for idx in range(len(x_bounds) - 1):
+        x0 = x_bounds[idx]
+        x1 = x_bounds[idx + 1]
+        gap = x1 - x0
+        if x0 < int(img_width * 0.18) and x1 <= max_name_end and gap >= min_col_width:
+            valid_candidates.append((gap, x0, x1, idx))
 
-    for idx in range(min(len(x_bounds) - 1, 5)):
-        gap = x_bounds[idx + 1] - x_bounds[idx]
-        if gap > best_gap:
-            best_gap = gap
-            best_start_idx = idx
-
-    name_x0 = x_bounds[best_start_idx]
-    name_x1 = x_bounds[best_start_idx + 1] if best_start_idx + 1 < len(x_bounds) else int(img_width * 0.40)
-
-    # Sr No column is just before the name column
-    sr_x0 = x_bounds[best_start_idx - 1] if best_start_idx > 0 else 0
+    if valid_candidates:
+        valid_candidates.sort(reverse=True, key=lambda c: c[0])
+        best_gap, name_x0, name_x1, best_idx = valid_candidates[0]
+        sr_x0 = x_bounds[best_idx - 1] if best_idx > 0 else 0
+    else:
+        name_x0 = int(img_width * 0.045)
+        name_x1 = int(img_width * 0.22)
+        sr_x0 = 0
 
     # Result area: rightmost ~35% of the table
     result_x0 = int(img_width * 0.65)
@@ -284,7 +298,7 @@ def process_marksheet_iter(pdf_path):
     """
     print(f"[Pipeline] Starting on {pdf_path}")
     try:
-        pages = convert_from_path(pdf_path, dpi=300)
+        pages = convert_from_path(pdf_path, dpi=200)
     except Exception as e:
         print(f"[Error] PDF conversion failed: {e}")
         return
@@ -347,21 +361,37 @@ def process_marksheet_iter(pdf_path):
         name_x0, name_x1, result_x0, sr_x0 = find_name_and_result_columns(x_bounds, img.shape[1])
 
         # ── 4. Row-by-Row Student + Result Extraction ──
+        row_ocr_cache = {}
+        for r_idx in range(len(y_bounds) - 1):
+            cell = gray[y_bounds[r_idx]:y_bounds[r_idx+1], name_x0:name_x1]
+            txt = ocr_upscaled(cell, psm=6)
+            row_ocr_cache[r_idx] = txt
+
         i = 0
         while i < len(y_bounds) - 1:
             matched_name = None
-            match_row_idx = i
 
             for off in range(0, 5):
                 idx = i + off
                 if idx + 1 >= len(y_bounds):
                     break
-                sub_roi = gray[y_bounds[idx]:y_bounds[idx+1], name_x0:name_x1]
-                ocr_text = ocr_upscaled(sub_roi, psm=6)
-                m_n, score = fuzzy_match_entity(ocr_text, KNOWN_NAMES)
-                if m_n and m_n not in seen_names:
-                    matched_name = m_n
-                    match_row_idx = idx
+                t1 = row_ocr_cache.get(idx, "")
+                m, s = fuzzy_match_entity(t1, KNOWN_NAMES)
+
+                # Check merged 2-row window for split names (e.g. Student 1)
+                if not m and idx + 2 < len(y_bounds):
+                    cell2 = gray[y_bounds[idx]:y_bounds[idx+2], name_x0:name_x1]
+                    t2 = ocr_upscaled(cell2, psm=6)
+                    m2, s2 = fuzzy_match_entity(t2, KNOWN_NAMES)
+                    if m2:
+                        m = m2
+                        # If row idx+1 alone matches, then idx was just noise; start at idx+1
+                        m_next_single, _ = fuzzy_match_entity(row_ocr_cache.get(idx+1, ""), KNOWN_NAMES)
+                        if m_next_single == m:
+                            idx = idx + 1
+
+                if m and m not in seen_names:
+                    matched_name = m
                     i = idx
                     break
 
@@ -369,67 +399,65 @@ def process_marksheet_iter(pdf_path):
                 i += 1
                 continue
 
+            # Find next student boundary starting from i + 1
             block_end_i = min(i + 15, len(y_bounds) - 1)
-            for k in range(i + 3, block_end_i):
+            for k in range(i + 1, block_end_i):
                 if k + 1 >= len(y_bounds):
                     break
-                chk_n_roi = gray[y_bounds[k]:y_bounds[k+1], name_x0:name_x1]
-                chk_n_text = ocr_upscaled(chk_n_roi, psm=6)
-                m_n, _ = fuzzy_match_entity(chk_n_text, KNOWN_NAMES)
-                if m_n and m_n != matched_name:
-                    block_end_i = k
-                    break
-                chk_sr_roi = gray[y_bounds[k]:y_bounds[k+1], sr_x0:name_x0]
-                chk_sr_text = ocr_upscaled(chk_sr_roi, psm=6).strip()
-                if re.search(r'^\d{1,3}$', chk_sr_text):
+                t_chk = row_ocr_cache.get(k, "")
+                m_next, _ = fuzzy_match_entity(t_chk, KNOWN_NAMES)
+                if m_next and m_next != matched_name:
                     block_end_i = k
                     break
 
+                # Check 2-row merged window for next student
+                if k + 2 < len(y_bounds):
+                    cell2 = gray[y_bounds[k]:y_bounds[k+2], name_x0:name_x1]
+                    t2 = ocr_upscaled(cell2, psm=6)
+                    m_next2, _ = fuzzy_match_entity(t2, KNOWN_NAMES)
+                    if m_next2 and m_next2 != matched_name:
+                        # If row k+1 alone matches m_next2, boundary is k+1
+                        m_k1, _ = fuzzy_match_entity(row_ocr_cache.get(k+1, ""), KNOWN_NAMES)
+                        if m_k1 == m_next2:
+                            block_end_i = k + 1
+                        else:
+                            block_end_i = k
+                        break
+
+            # Result extraction for this student's block [i : block_end_i]
             best_gpa = 0.0
             best_status = "P"
             block_roi = gray[y_bounds[i]:y_bounds[block_end_i], result_x0:img.shape[1]-10]
-            for pval in [3, 6]:
-                txt = ocr_upscaled(block_roi, psm=pval).upper()
+
+            for pval in [11, 6]:
+                txt = ocr_upscaled(block_roi, psm=pval)
                 g, s = parse_marks_box(txt)
                 if s == "F":
                     best_gpa, best_status = 0.0, "F"
                     break
                 if g > 0:
                     best_gpa, best_status = g, s
+                    break
 
+            # Fallback to last 2 rows in block if needed (GPA/result is strictly at the bottom)
             if best_gpa == 0.0 and best_status == "P":
-                for k_sub in range(i, block_end_i):
+                check_start = max(i, block_end_i - 2)
+                for k_sub in range(check_start, block_end_i):
                     if k_sub + 1 >= len(y_bounds):
                         break
                     row_roi = gray[y_bounds[k_sub]:y_bounds[k_sub+1], result_x0:img.shape[1]-10]
-                    for pval in [6, 11]:
-                        row_text = ocr_upscaled(row_roi, psm=pval).upper()
-                        g, s = parse_marks_box(row_text)
-                        if s == "F":
-                            best_gpa, best_status = 0.0, "F"
-                            break
-                        if g > 0:
-                            best_gpa, best_status = g, s
-                    if best_status == "F" or best_gpa > 0:
+                    row_text = ocr_upscaled(row_roi, psm=6)
+                    g, s = parse_marks_box(row_text)
+                    if s == "F":
+                        best_gpa, best_status = 0.0, "F"
+                        break
+                    if g > 0:
+                        best_gpa, best_status = g, s
                         break
 
-            if best_gpa == 0.0 and best_status == "P" and len(x_bounds) > 2:
-                last_col_x0 = x_bounds[-2]
-                for k_sub in range(block_end_i - 1, i, -1):
-                    if k_sub + 1 >= len(y_bounds):
-                        continue
-                    cell_roi = gray[y_bounds[k_sub]:y_bounds[k_sub+1], last_col_x0:img.shape[1]-10]
-                    for pval in [6, 7, 11]:
-                        cell_text = ocr_upscaled(cell_roi, psm=pval).upper()
-                        g, s = parse_marks_box(cell_text)
-                        if s == "F":
-                            best_gpa, best_status = 0.0, "F"
-                            break
-                        if g > 0:
-                            best_gpa, best_status = g, s
-                            break
-                    if best_status == "F" or best_gpa > 0:
-                        break
+            # If no passing GPA was found, student is Fail / ATKT
+            if best_gpa == 0.0:
+                best_status = "F"
 
             page_results.append({"name": matched_name, "gpa": best_gpa, "status": best_status})
             seen_names.add(matched_name)

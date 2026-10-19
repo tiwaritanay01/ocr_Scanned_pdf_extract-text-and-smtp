@@ -168,6 +168,8 @@ const initialStudentsData = {
     ]
 };
 
+const initialKtAttempts = [];
+
 export const DataProvider = ({ children }) => {
     const [students, setStudents] = useState(() => {
         try {
@@ -193,10 +195,14 @@ export const DataProvider = ({ children }) => {
     const [ktAttempts, setKtAttempts] = useState(() => {
         try {
             const saved = localStorage.getItem('global_kt_attempts');
-            return saved ? JSON.parse(saved) : [];
+            if (saved) {
+                const parsed = JSON.parse(saved);
+                if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+            }
         } catch (e) {
-            return [];
+            console.warn('Failed to parse cached kt attempts:', e);
         }
+        return initialKtAttempts;
     });
 
     // Reconciliation summary state

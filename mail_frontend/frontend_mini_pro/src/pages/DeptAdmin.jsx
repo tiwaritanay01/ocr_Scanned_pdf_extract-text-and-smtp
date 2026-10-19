@@ -3,7 +3,7 @@ import { useTheme } from '../context/ThemeContext';
 import {
     Search, Upload, FileDown, Save, ChevronLeft, LayoutGrid, Eye,
     List, GraduationCap, Filter, MoreHorizontal, ArrowLeft, Users, Activity, Plus, Trash2, Send, Shield, X, Info,
-    Edit3, Undo2, CheckCircle2, AlertTriangle, Sparkles, FileSpreadsheet, RefreshCw, Download, Layers, Check
+    Edit3, Undo2, CheckCircle2, AlertTriangle, FileSpreadsheet, RefreshCw, Download, Layers, Check
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import * as XLSX from 'xlsx';
@@ -59,22 +59,22 @@ export default function DeptAdminDashboard() {
     };
 
     const handleFileUpload = async (event) => {
-        const file = event.target.files[0];
+        const file = event.target.files?.[0];
         if (!file || !selectedYear) return;
 
         setIsLoading(true);
         setError(null);
 
-        const user = JSON.parse(localStorage.getItem('user') || '{}');
-        const formData = new FormData();
-        formData.append('file', file);
-
-        // Use master list for post-extraction mapping
-        const masterList = students[selectedYear];
-        const expectedNames = masterList.map(s => s.name);
-        formData.append('expected_names', JSON.stringify(expectedNames));
-
         try {
+            const user = JSON.parse(localStorage.getItem('user') || '{}');
+            const formData = new FormData();
+            formData.append('file', file);
+
+            // Use master list for post-extraction mapping (safely handle KT mode)
+            const targetLevel = selectedYear === 'KT' ? (ktLevel || 'SE') : selectedYear;
+            const masterList = students[targetLevel] || [];
+            const expectedNames = masterList.map(s => s.name || '').filter(Boolean);
+            formData.append('expected_names', JSON.stringify(expectedNames));
             if (importMode === 'excel') {
                 // === EXCEL IMPORT PATH ===
                 const response = await fetch(`${API_BASE_URL}/upload-excel?user_name=${encodeURIComponent(user.name || 'Unknown')}&semester=${uploadSemester}`, {
@@ -112,6 +112,60 @@ export default function DeptAdminDashboard() {
                     setIsApproved(false);
                 }
                 alert(`Excel Import Complete! Added ${data.count} students.`);
+            } else if (selectedYear === 'KT') {
+                // === KT PDF OCR PATH ===
+                const queryParams = new URLSearchParams({
+                    user_name: user.name || 'Anonymous',
+                    exam_session: ktSession,
+                    semester: uploadSemester,
+                    student_level: ktLevel,
+                });
+
+                const response = await fetch(`${API_BASE_URL}/upload-kt?${queryParams.toString()}`, {
+                    method: 'POST',
+                    body: formData,
+                });
+
+                if (!response.ok) {
+                    const errData = await response.json();
+                    throw new Error(errData.detail || 'KT upload failed');
+                }
+
+                const data = await response.json();
+                if (data.success && data.students) {
+                    const defaultMarks = {};
+                    (ktLevel === 'FE' ? [1, 2] : ktLevel === 'SE' ? [3, 4] : ktLevel === 'TE' ? [5, 6] : [1, 2, 3, 4, 5, 6, 7, 8]).forEach(num => {
+                        defaultMarks[`sem${num}`] = { gpa: 0, status: 'P', ocrValue: 0, ocrStatus: 'P' };
+                    });
+
+                    const mapped = data.students.map(s => ({
+                        id: Date.now() + Math.random(),
+                        name: s.name,
+                        ern: s.ern || s.roll || 'N/A',
+                        roll: s.roll || s.ern || 'N/A',
+                        email: 'pending@college.edu',
+                        isExtracted: true,
+                        extractedFrom: `KT PDF OCR (${s.exam_session || ktSession})`,
+                        examSession: s.exam_session || ktSession,
+                        clearancePointer: s.ocr_result?.clearance_pointer || null,
+                        marks: {
+                            ...defaultMarks,
+                            [uploadSemester]: {
+                                gpa: Number(s.ocr_result?.gpa || 0),
+                                status: s.ocr_result?.status || 'P',
+                                ocrValue: Number(s.ocr_result?.gpa || 0),
+                                ocrStatus: s.ocr_result?.status || 'P',
+                                screenshot: s.ocr_result?.screenshot || null,
+                                subjectMarks: s.ocr_result?.subjectMarks || null
+                            }
+                        }
+                    }));
+                    setBatchResults(mapped);
+                    if (data.file_id) setCurrentFileId(data.file_id);
+                    setIsApproved(false);
+                    fetchKTResults();
+                }
+                alert(`KT Extraction Complete! Added ${data.count || 0} student attempt(s).`);
             } else if (selectedYear === 'FE' || selectedYear === 'BE') {
                 // === FE/BE PDF PATH ===
                 const response = await fetch(`${API_BASE_URL}/upload-fe-be?user_name=${encodeURIComponent(user.name || 'Unknown')}&semester=${uploadSemester}`, {
@@ -266,6 +320,7 @@ export default function DeptAdminDashboard() {
             setError('Error: ' + err.message);
         } finally {
             setIsLoading(false);
+            if (event.target) event.target.value = '';
         }
     };
 
@@ -361,7 +416,131 @@ export default function DeptAdminDashboard() {
         ));
     };
 
+    const loadKTBatch = async (level = ktLevel, sem = uploadSemester) => {
+        setIsLoading(true);
+        try {
+            let attemptsToUse = [];
+            try {
+                const res = await fetch(`${API_BASE_URL}/kt-results?student_level=${level}&semester=${sem}`);
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data.success && Array.isArray(data.results) && data.results.length > 0) {
+                        attemptsToUse = data.results;
+                        setKtAttempts(prev => {
+                            const existingIds = new Set(data.results.map(r => r.attempt_id));
+                            const remaining = prev.filter(p => !existingIds.has(p.attempt_id));
+                            return [...data.results, ...remaining];
+                        });
+                    }
+                }
+            } catch (fetchErr) {
+                console.warn('Backend fetch for KT attempts failed, falling back to local state:', fetchErr);
+            }
+
+            if (!attemptsToUse.length && ktAttempts.length > 0) {
+                const filtered = ktAttempts.filter(a => (!level || a.student_level === level));
+                if (filtered.length > 0) attemptsToUse = filtered;
+            }
+
+            if (attemptsToUse.length > 0) {
+                const defaultMarks = {};
+                (level === 'FE' ? [1, 2] : level === 'SE' ? [3, 4] : level === 'TE' ? [5, 6] : [1, 2, 3, 4, 5, 6, 7, 8]).forEach(num => {
+                    defaultMarks[`sem${num}`] = { gpa: 0, status: 'P', ocrValue: 0, ocrStatus: 'P' };
+                });
+
+                const mapped = attemptsToUse.map(att => ({
+                    id: att.attempt_id || (Date.now() + Math.random()),
+                    name: att.student_name || 'Student',
+                    ern: att.student_identifier || 'N/A',
+                    roll: att.student_identifier || 'N/A',
+                    email: 'student@college.edu',
+                    isExtracted: true,
+                    extractedFrom: att.exam_session ? `KT (${att.exam_session})` : 'STORED KT RECORD',
+                    examSession: att.exam_session || ktSession,
+                    clearancePointer: att.clearance_pointer || null,
+                    marks: {
+                        ...defaultMarks,
+                        [att.semester || sem]: {
+                            gpa: Number(att.gpa || 0),
+                            status: (att.attempt_status || 'P').toUpperCase().startsWith('P') ? 'P' : 'F',
+                            ocrValue: Number(att.gpa || 0),
+                            ocrStatus: (att.attempt_status || 'P').toUpperCase().startsWith('P') ? 'P' : 'F',
+                            screenshot: att.screenshot || null,
+                            subjectMarks: att.subject_marks || null
+                        }
+                    }
+                }));
+                setBatchResults(mapped);
+            } else {
+                // If no attempts found, check regular pool for students with backlogs (status === 'F')
+                const poolList = students[level] || [];
+                const backlogStudents = poolList.filter(s =>
+                    Object.values(s.marks || {}).some(m => m.status === 'F' || m.ocrStatus === 'F')
+                );
+                if (backlogStudents.length > 0) {
+                    const prepared = backlogStudents.map(s => {
+                        const normalizedMarks = {};
+                        Object.entries(s.marks || {}).forEach(([mSem, m]) => {
+                            normalizedMarks[mSem] = {
+                                ...m,
+                                ocrValue: m.ocrValue !== undefined ? m.ocrValue : (m.gpa ?? 0),
+                                ocrStatus: m.ocrStatus !== undefined ? m.ocrStatus : (m.status ?? 'P')
+                            };
+                        });
+                        return {
+                            ...s,
+                            isExtracted: true,
+                            extractedFrom: `${level} BACKLOG POOL`,
+                            examSession: ktSession,
+                            marks: normalizedMarks
+                        };
+                    });
+                    setBatchResults(prepared);
+                } else {
+                    setBatchResults([]);
+                }
+            }
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    const loadStoredKTToBatch = () => {
+        loadKTBatch(ktLevel, uploadSemester);
+    };
+
+    const loadFailedStudentsFromPool = () => {
+        const poolList = students[ktLevel] || [];
+        const backlogStudents = poolList.filter(s =>
+            Object.values(s.marks || {}).some(m => m.status === 'F' || m.ocrStatus === 'F')
+        );
+        const targetList = backlogStudents.length > 0 ? backlogStudents : poolList;
+        const prepared = targetList.map(s => {
+            const normalizedMarks = {};
+            Object.entries(s.marks || {}).forEach(([mSem, m]) => {
+                normalizedMarks[mSem] = {
+                    ...m,
+                    ocrValue: m.ocrValue !== undefined ? m.ocrValue : (m.gpa ?? 0),
+                    ocrStatus: m.ocrStatus !== undefined ? m.ocrStatus : (m.status ?? 'P')
+                };
+            });
+            return {
+                ...s,
+                isExtracted: true,
+                extractedFrom: `${ktLevel} POOL (CANDIDATE)`,
+                examSession: ktSession,
+                marks: normalizedMarks
+            };
+        });
+        setBatchResults(prepared);
+        setIsApproved(false);
+    };
+
     const loadStoredStudentsToBatch = () => {
+        if (selectedYear === 'KT') {
+            loadKTBatch(ktLevel, uploadSemester);
+            return;
+        }
         const list = students[selectedYear] || [];
         if (!list.length) {
             alert(`No stored students found for ${selectedYear}`);
@@ -414,6 +593,65 @@ export default function DeptAdminDashboard() {
     const finalizeAndSave = () => {
         if (!window.confirm("Apply these changes to the permanent database?")) return;
 
+        if (selectedYear === 'KT') {
+            const updatedAttempts = [...ktAttempts];
+            batchResults.forEach(batchS => {
+                const markObj = batchS.marks?.[uploadSemester] || {};
+                const attemptObj = {
+                    attempt_id: batchS.id,
+                    student_identifier: batchS.ern || batchS.roll || 'N/A',
+                    student_name: batchS.name,
+                    student_level: ktLevel,
+                    exam_session: batchS.examSession || ktSession,
+                    semester: uploadSemester,
+                    attempt_status: (markObj.status === 'P' || markObj.status === 'PASS') ? 'PASS' : 'FAIL',
+                    gpa: Number(markObj.gpa || 0),
+                    clearance_pointer: batchS.clearancePointer || null,
+                    source_pdf: batchS.extractedFrom || 'Manual Entry',
+                    screenshot: markObj.screenshot || null,
+                    exam_type: 'KT',
+                    created_at: new Date().toISOString()
+                };
+                const idx = updatedAttempts.findIndex(a => 
+                    (a.student_identifier === attemptObj.student_identifier || a.student_name === attemptObj.student_name) &&
+                    a.semester === uploadSemester &&
+                    a.exam_session === attemptObj.exam_session
+                );
+                if (idx !== -1) {
+                    updatedAttempts[idx] = { ...updatedAttempts[idx], ...attemptObj };
+                } else {
+                    updatedAttempts.unshift(attemptObj);
+                }
+            });
+            setKtAttempts(updatedAttempts);
+            setBatchResults([]);
+            alert("KT Batch finalized and saved!");
+            return;
+        }
+
+        // Automatically persist regular results to permanent database (examination_attempts)
+        const payloadStudents = [...batchResults];
+        const targetYear = selectedYear;
+        const targetSem = uploadSemester;
+
+        fetch(`${API_BASE_URL}/store-regular-attempts`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                student_level: targetYear,
+                exam_session: 'FH 2026',
+                semester: targetSem,
+                students: payloadStudents,
+            }),
+        })
+        .then(res => res.json())
+        .then(data => {
+            console.log(`[Auto-Sync] Persisted ${data.imported || 0} regular attempts to database.`);
+        })
+        .catch(err => {
+            console.error("[Auto-Sync Error] Could not persist to DB:", err);
+        });
+
         setStudents(prev => {
             const updatedYearData = [...prev[selectedYear]];
             batchResults.forEach(batchS => {
@@ -435,7 +673,7 @@ export default function DeptAdminDashboard() {
         });
 
         setBatchResults([]);
-        alert("Batch finalized and saved!");
+        alert("Batch finalized and saved to database!");
     };
 
     const handleMarkChange = (year, studentId, sem, field, value) => {
@@ -472,7 +710,7 @@ export default function DeptAdminDashboard() {
     };
 
     const handleExportToExcel = () => {
-        const dataList = batchResults.length > 0 ? batchResults : students[selectedYear];
+        const dataList = batchResults.length > 0 ? batchResults : (selectedYear === 'KT' ? [] : students[selectedYear]);
         if (!selectedYear || !dataList.length) {
             alert("No data to export!");
             return;
@@ -508,6 +746,16 @@ export default function DeptAdminDashboard() {
                     row[`Sem ${s} GPA`] = student.marks[`sem${s}`]?.gpa || 0;
                     row[`Sem ${s} Status`] = student.marks[`sem${s}`]?.status || 'P';
                 });
+            } else if (selectedYear === 'KT') {
+                row["Exam Session"] = student.examSession || ktSession;
+                row["Level"] = ktLevel;
+                (ktLevel === 'FE' ? [1, 2] : ktLevel === 'SE' ? [3, 4] : ktLevel === 'TE' ? [5, 6] : [1, 2, 3, 4, 5, 6, 7, 8]).forEach(s => {
+                    row[`Sem ${s} GPA`] = student.marks[`sem${s}`]?.gpa || 0;
+                    row[`Sem ${s} Status`] = student.marks[`sem${s}`]?.status || 'P';
+                });
+                if (student.clearancePointer) {
+                    row["Clearance Pointer"] = student.clearancePointer;
+                }
             }
             
             row["Average GPA"] = calculateAvg(student.marks).toFixed(2);
@@ -552,7 +800,7 @@ export default function DeptAdminDashboard() {
             return;
         }
 
-        const listToMail = batchResults.length > 0 ? batchResults : students[selectedYear];
+        const listToMail = batchResults.length > 0 ? batchResults : (selectedYear === 'KT' ? [] : (students[selectedYear] || []));
 
         if (!selectedYear || !listToMail.length) {
             alert("No data to mail!");
@@ -604,15 +852,19 @@ export default function DeptAdminDashboard() {
         }
     };
 
-    const handleSelectKT = () => {
+    const handleSelectKT = async () => {
         setSelectedYear('KT');
-        setViewMode('kt');
-        fetchKTResults();
+        setKtLevel('SE');
+        setUploadSemester('sem3');
+        setKtSemester('sem3');
+        setIsApproved(false);
+        setViewMode('edit');
+        await loadKTBatch('SE', 'sem3');
     };
 
-    const fetchKTResults = async () => {
+    const fetchKTResults = async (level = ktLevel, sem = (uploadSemester || ktSemester)) => {
         try {
-            const url = `${API_BASE_URL}/kt-results?student_level=${ktLevel}&semester=${ktSemester}`;
+            const url = `${API_BASE_URL}/kt-results?student_level=${level}&semester=${sem}`;
             const res = await fetch(url);
             if (res.ok) {
                 const data = await res.json();
@@ -697,6 +949,8 @@ export default function DeptAdminDashboard() {
             setSyncingRegular(false);
         }
     };
+
+
 
     const handleRunReconciliation = async () => {
         try {
@@ -892,29 +1146,6 @@ export default function DeptAdminDashboard() {
                         </div>
                     </div>
 
-                ) : viewMode === 'kt' ? (
-                    <KTProcessingView
-                        onBack={() => setViewMode('dashboard')}
-                        ktAttempts={ktAttempts}
-                        ktSession={ktSession}
-                        setKtSession={setKtSession}
-                        ktLevel={ktLevel}
-                        setKtLevel={setKtLevel}
-                        ktSemester={ktSemester}
-                        setKtSemester={setKtSemester}
-                        onUpload={handleKTUpload}
-                        isLoading={ktUploadLoading}
-                        onSyncRegular={handleSyncRegular}
-                        isSyncing={syncingRegular}
-                        onRefresh={fetchKTResults}
-                        onOpenReconcile={() => {
-                            setReconcileLevel(ktLevel);
-                            setReconcileSemester(ktSemester);
-                            setShowReconcileModal(true);
-                            handleRunReconciliation();
-                        }}
-                        onPreviewImage={setPreviewImage}
-                    />
                 ) : (
                     <div className="animate-fade-in space-y-6">
                         <button
@@ -929,10 +1160,12 @@ export default function DeptAdminDashboard() {
                         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6 mb-8 bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm">
                             <div>
                                 <h2 className="text-2xl font-bold text-slate-900 dark:text-white flex items-center gap-3">
-                                    {selectedYear} Result Management
+                                    {selectedYear === 'KT' ? 'KT Result Management' : `${selectedYear} Result Management`}
                                 </h2>
                                 <p className="text-sm text-slate-500 mt-1">
-                                    {batchResults.length > 0 ? `Working on ${batchResults.length} students` : 'Select a master list and upload to begin.'}
+                                    {batchResults.length > 0 
+                                        ? `Working on ${batchResults.length} ${selectedYear === 'KT' ? 'KT ' : ''}students` 
+                                        : (selectedYear === 'KT' ? 'Select semester and import KT marksheet or load records.' : 'Select a master list and upload to begin.')}
                                 </p>
                                 {isLoading && <div className="mt-2 flex items-center gap-2 text-blue-600 font-bold animate-pulse text-xs uppercase tracking-wider"><Activity className="w-3 h-3"/> Processing Results {error}</div>}
                                 {error && !isLoading && <div className="mt-2 text-amber-500 font-bold text-xs uppercase tracking-wider">{error}</div>}
@@ -941,26 +1174,39 @@ export default function DeptAdminDashboard() {
                             <div className="flex flex-wrap items-center gap-3">
                                 <button
                                     onClick={() => {
+                                        const defaultMarks = {};
+                                        (ktLevel === 'FE' ? [1, 2] : ktLevel === 'SE' ? [3, 4] : ktLevel === 'TE' ? [5, 6] : [1, 2, 3, 4, 5, 6, 7, 8]).forEach(num => {
+                                            defaultMarks[`sem${num}`] = { gpa: 0, status: "P", ocrValue: 0, ocrStatus: "P" };
+                                        });
                                         const newS = {
                                             id: Date.now(),
                                             name: "New Student",
-                                            roll: `${selectedYear}-XXX`,
+                                            roll: selectedYear === 'KT' ? `KT-${ktLevel}-${Date.now().toString().slice(-4)}` : `${selectedYear}-XXX`,
+                                            ern: selectedYear === 'KT' ? `KT${Date.now().toString().slice(-6)}` : 'N/A',
                                             email: "new@college.edu",
-                                            marks: selectedYear === 'SE' ? {
-                                                sem3: { gpa: 0, status: "P" },
-                                                sem4: { gpa: 0, status: "P" }
-                                            } : {
-                                                sem3: { gpa: 0, status: "P" },
-                                                sem4: { gpa: 0, status: "P" },
-                                                sem5: { gpa: 0, status: "P" },
-                                                sem6: { gpa: 0, status: "P" }
-                                            }
+                                            examSession: selectedYear === 'KT' ? ktSession : undefined,
+                                            marks: selectedYear === 'KT' ? defaultMarks : (
+                                                selectedYear === 'SE' ? {
+                                                    sem3: { gpa: 0, status: "P" },
+                                                    sem4: { gpa: 0, status: "P" }
+                                                } : selectedYear === 'FE' ? {
+                                                    sem1: { gpa: 0, status: "P" },
+                                                    sem2: { gpa: 0, status: "P" }
+                                                } : {
+                                                    sem3: { gpa: 0, status: "P" },
+                                                    sem4: { gpa: 0, status: "P" },
+                                                    sem5: { gpa: 0, status: "P" },
+                                                    sem6: { gpa: 0, status: "P" }
+                                                }
+                                            )
                                         };
                                         setBatchResults(prev => [newS, ...prev]);
-                                        setStudents(prev => ({
-                                            ...prev,
-                                            [selectedYear]: [newS, ...prev[selectedYear]]
-                                        }));
+                                        if (selectedYear !== 'KT') {
+                                            setStudents(prev => ({
+                                                ...prev,
+                                                [selectedYear]: [newS, ...(prev[selectedYear] || [])]
+                                            }));
+                                        }
                                     }}
                                     className="px-4 py-2 text-xs font-bold text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-900/30 rounded-xl transition-all flex items-center gap-2"
                                 >
@@ -976,11 +1222,41 @@ export default function DeptAdminDashboard() {
 
                                 <div className="h-8 w-px bg-slate-100 dark:bg-slate-800 hidden sm:block mx-1"></div>
 
+                                {selectedYear === 'KT' && (
+                                    <div className="flex items-center gap-2 px-3 py-2 bg-slate-50 dark:bg-slate-800/50 rounded-xl border border-slate-200 dark:border-slate-700">
+                                        <span className="text-[10px] font-bold text-slate-400 uppercase">Level:</span>
+                                        <select
+                                            value={ktLevel}
+                                            onChange={(e) => {
+                                                const newLvl = e.target.value;
+                                                setKtLevel(newLvl);
+                                                const newSem = newLvl === 'FE' ? 'sem1' : newLvl === 'SE' ? 'sem3' : newLvl === 'TE' ? 'sem5' : 'sem7';
+                                                setUploadSemester(newSem);
+                                                setKtSemester(newSem);
+                                                loadKTBatch(newLvl, newSem);
+                                            }}
+                                            className="bg-transparent text-sm font-bold text-rose-600 outline-none cursor-pointer"
+                                        >
+                                            <option value="FE">FE</option>
+                                            <option value="SE">SE</option>
+                                            <option value="TE">TE</option>
+                                            <option value="BE">BE</option>
+                                        </select>
+                                    </div>
+                                )}
+
                                 <div className="flex items-center gap-2 px-3 py-2 bg-slate-50 dark:bg-slate-800/50 rounded-xl border border-slate-200 dark:border-slate-700">
                                     <span className="text-[10px] font-bold text-slate-400 uppercase">Sem:</span>
                                     <select
                                         value={uploadSemester}
-                                        onChange={(e) => setUploadSemester(e.target.value)}
+                                        onChange={(e) => {
+                                            const newSem = e.target.value;
+                                            setUploadSemester(newSem);
+                                            if (selectedYear === 'KT') {
+                                                setKtSemester(newSem);
+                                                loadKTBatch(ktLevel, newSem);
+                                            }
+                                        }}
                                         className="bg-transparent text-sm font-bold text-blue-600 outline-none cursor-pointer"
                                     >
                                         {selectedYear === 'FE' && (
@@ -1008,8 +1284,41 @@ export default function DeptAdminDashboard() {
                                         {selectedYear === 'BE' && (
                                             [1, 2, 3, 4, 5, 6, 7, 8].map(s => <option key={s} value={`sem${s}`}>Sem {s}</option>)
                                         )}
+                                        {selectedYear === 'KT' && (
+                                            ktLevel === 'FE' ? (
+                                                <>
+                                                    <option value="sem1">Sem 1</option>
+                                                    <option value="sem2">Sem 2</option>
+                                                </>
+                                            ) : ktLevel === 'SE' ? (
+                                                <>
+                                                    <option value="sem3">Sem 3</option>
+                                                    <option value="sem4">Sem 4</option>
+                                                </>
+                                            ) : ktLevel === 'TE' ? (
+                                                <>
+                                                    <option value="sem5">Sem 5</option>
+                                                    <option value="sem6">Sem 6</option>
+                                                </>
+                                            ) : (
+                                                [1, 2, 3, 4, 5, 6, 7, 8].map(s => <option key={s} value={`sem${s}`}>Sem {s}</option>)
+                                            )
+                                        )}
                                     </select>
                                 </div>
+
+                                {selectedYear === 'KT' && (
+                                    <div className="flex items-center gap-2 px-3 py-2 bg-slate-50 dark:bg-slate-800/50 rounded-xl border border-slate-200 dark:border-slate-700">
+                                        <span className="text-[10px] font-bold text-slate-400 uppercase">Session:</span>
+                                        <input
+                                            type="text"
+                                            value={ktSession}
+                                            onChange={(e) => setKtSession(e.target.value)}
+                                            className="bg-transparent text-xs font-bold text-indigo-600 outline-none w-20"
+                                            placeholder="SH 2026"
+                                        />
+                                    </div>
+                                )}
 
                                 <div className="flex items-center gap-2 px-3 py-2 bg-slate-50 dark:bg-slate-800/50 rounded-xl border border-slate-200 dark:border-slate-700">
                                     <span className="text-[10px] font-bold text-slate-400 uppercase">Mode:</span>
@@ -1067,9 +1376,23 @@ export default function DeptAdminDashboard() {
                                 )}
 
                                 <div className="flex items-center gap-1.5">
+                                    {selectedYear === 'KT' && (
+                                        <>
+                                            <button
+                                                onClick={handleSyncRegular}
+                                                disabled={syncingRegular}
+                                                className="px-3 py-2 text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 border border-blue-200 dark:border-blue-800/40 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5"
+                                                title="Sync regular attempts into multi-attempt reconciliation pool"
+                                            >
+                                                <RefreshCw className={`w-4 h-4 ${syncingRegular ? 'animate-spin text-blue-600' : ''}`} />
+                                                <span>{syncingRegular ? 'Syncing...' : 'Sync Regular Pool'}</span>
+                                            </button>
+                                        </>
+                                    )}
                                     <button
                                         onClick={() => {
-                                            setReconcileLevel(selectedYear);
+                                            setReconcileLevel(selectedYear === 'KT' ? ktLevel : selectedYear);
+                                            setReconcileSemester(selectedYear === 'KT' ? uploadSemester : '');
                                             setShowReconcileModal(true);
                                             handleRunReconciliation();
                                         }}
@@ -1143,7 +1466,7 @@ export default function DeptAdminDashboard() {
                                 <table className="w-full text-sm text-left">
                                     <thead>
                                         <tr className="bg-slate-50 dark:bg-slate-800/50 border-b border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300">
-                                            <th className="px-6 py-4 font-semibold whitespace-nowrap">{(selectedYear === 'FE' || selectedYear === 'BE') ? 'ERN / Name' : 'Student Name'}</th>
+                                            <th className="px-6 py-4 font-semibold whitespace-nowrap">{(selectedYear === 'FE' || selectedYear === 'BE' || selectedYear === 'KT') ? 'ERN / Name' : 'Student Name'}</th>
                                                     
                                                     {selectedYear === 'FE' && (
                                                         <>
@@ -1170,6 +1493,18 @@ export default function DeptAdminDashboard() {
                                                         <th key={s} className="px-4 py-4 font-semibold text-center whitespace-nowrap">Sem {s}</th>
                                                     ))}
 
+                                                    {selectedYear === 'KT' && (
+                                                        <>
+                                                            {(ktLevel === 'FE' ? [1, 2] : ktLevel === 'SE' ? [3, 4] : ktLevel === 'TE' ? [5, 6] : [1, 2, 3, 4, 5, 6, 7, 8]).map(s => (
+                                                                <th key={s} className={`px-4 py-4 font-semibold text-center whitespace-nowrap ${uploadSemester === `sem${s}` ? 'text-rose-500 dark:text-rose-400 bg-rose-500/10 rounded-lg' : ''}`}>
+                                                                    Sem {s} {uploadSemester === `sem${s}` ? '(KT)' : ''}
+                                                                </th>
+                                                            ))}
+                                                            <th className="px-4 py-4 font-semibold text-center whitespace-nowrap">Clearance Pointer</th>
+                                                            <th className="px-6 py-4 font-semibold text-center">Preview</th>
+                                                        </>
+                                                    )}
+
                                                     {(selectedYear === 'FE' || selectedYear === 'BE') && (
                                                         <th className="px-6 py-4 font-semibold text-center">Preview</th>
                                                     )}
@@ -1179,7 +1514,7 @@ export default function DeptAdminDashboard() {
                                     <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                                         {filteredBatchResults.length === 0 && (
                                             <tr>
-                                                <td colSpan={selectedYear === 'BE' ? 11 : (selectedYear === 'FE' ? 5 : 4)} className="py-16 text-center">
+                                                <td colSpan={selectedYear === 'BE' ? 11 : (selectedYear === 'FE' ? 5 : (selectedYear === 'KT' ? 6 : 4))} className="py-16 text-center">
                                                     <div className="flex flex-col items-center justify-center gap-3 max-w-md mx-auto">
                                                         <div className="w-14 h-14 rounded-2xl bg-amber-50 dark:bg-amber-950/30 text-amber-600 dark:text-amber-400 flex items-center justify-center border border-amber-200 dark:border-amber-800 shadow-sm">
                                                             {searchQuery ? <Search className="w-6 h-6" /> : <Upload className="w-6 h-6" />}
@@ -1191,10 +1526,34 @@ export default function DeptAdminDashboard() {
                                                             <p className="text-xs text-slate-500 mt-1">
                                                                 {searchQuery 
                                                                     ? `No students in the current batch matched "${searchQuery}".` 
-                                                                    : 'Import a PDF / Excel file to extract results, or load stored students to review and edit.'}
+                                                                    : (selectedYear === 'KT'
+                                                                        ? 'Import a KT PDF to extract results, or load stored records / backlog students to review and edit.'
+                                                                        : 'Import a PDF / Excel file to extract results, or load stored students to review and edit.')}
                                                             </p>
                                                         </div>
-                                                        {!searchQuery && (students[selectedYear]?.length > 0) && (
+                                                        {!searchQuery && selectedYear === 'KT' && (
+                                                            <div className="flex flex-wrap items-center justify-center gap-2 mt-2">
+                                                                {ktAttempts.length > 0 && (
+                                                                    <button
+                                                                        onClick={loadStoredKTToBatch}
+                                                                        className="px-5 py-2.5 bg-gradient-to-r from-rose-600 to-pink-600 hover:from-rose-700 hover:to-pink-700 text-white rounded-xl text-xs font-bold shadow-lg shadow-rose-500/25 transition-all flex items-center gap-2 hover:scale-[1.02] active:scale-[0.98]"
+                                                                    >
+                                                                        <Users className="w-4 h-4" />
+                                                                        Load {ktAttempts.length} Stored KT Records for Review & Edit
+                                                                    </button>
+                                                                )}
+                                                                {students[ktLevel]?.length > 0 && (
+                                                                    <button
+                                                                        onClick={loadFailedStudentsFromPool}
+                                                                        className="px-4 py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white rounded-xl text-xs font-bold shadow-lg shadow-blue-500/25 transition-all flex items-center gap-2 hover:scale-[1.02] active:scale-[0.98]"
+                                                                    >
+                                                                        <AlertTriangle className="w-4 h-4" />
+                                                                        Load Backlog / KT Students from {ktLevel} Pool
+                                                                    </button>
+                                                                )}
+                                                            </div>
+                                                        )}
+                                                        {!searchQuery && selectedYear !== 'KT' && (students[selectedYear]?.length > 0) && (
                                                             <button
                                                                 onClick={loadStoredStudentsToBatch}
                                                                 className="mt-2 px-5 py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white rounded-xl text-xs font-bold shadow-lg shadow-blue-500/25 transition-all flex items-center gap-2 hover:scale-[1.02] active:scale-[0.98]"
@@ -1219,9 +1578,9 @@ export default function DeptAdminDashboard() {
                                                             className={`bg-transparent border-b border-transparent focus:border-blue-500 outline-none w-full font-medium transition-opacity ${!isEditing ? 'opacity-70 pointer-events-none' : ''}`}
                                                             placeholder="Student Name"
                                                         />
-                                                        {(selectedYear === 'FE' || selectedYear === 'BE') && (
+                                                        {(selectedYear === 'FE' || selectedYear === 'BE' || selectedYear === 'KT') && (
                                                             <span className="text-[10px] font-mono text-slate-400 mt-0.5">
-                                                                ERN: {student.ern || 'N/A'}
+                                                                ERN: {student.ern || student.roll || 'N/A'}{student.examSession ? ` • ${student.examSession}` : ''}
                                                             </span>
                                                         )}
                                                     </div>
@@ -1303,6 +1662,56 @@ export default function DeptAdminDashboard() {
                                                         </td>
                                                     </>
                                                 )}
+                                                {selectedYear === 'KT' && (
+                                                    <>
+                                                        {(ktLevel === 'FE' ? [1, 2] : ktLevel === 'SE' ? [3, 4] : ktLevel === 'TE' ? [5, 6] : [1, 2, 3, 4, 5, 6, 7, 8]).map(s => (
+                                                            <td key={s} className="px-2 py-4 text-center relative overflow-visible">
+                                                                <EditableResultCell
+                                                                    studentId={student.id}
+                                                                    sem={`sem${s}`}
+                                                                    markData={student.marks[`sem${s}`] || { gpa: 0, status: 'P', ocrValue: 0, ocrStatus: 'P' }}
+                                                                    isApproved={isApproved}
+                                                                    isEditing={isEditing}
+                                                                    isHighlighted={uploadSemester === `sem${s}`}
+                                                                    size="normal"
+                                                                    onChange={handleBatchMarkChange}
+                                                                    onRevert={handleRevertBatchMark}
+                                                                />
+                                                            </td>
+                                                        ))}
+                                                        <td className="px-4 py-4 text-center">
+                                                            {student.clearancePointer ? (
+                                                                <span className="px-2 py-1 bg-purple-50 dark:bg-purple-950/40 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800 rounded-lg text-xs font-mono font-bold">
+                                                                    {student.clearancePointer}
+                                                                </span>
+                                                            ) : (
+                                                                <span className="text-slate-400 text-xs">—</span>
+                                                            )}
+                                                        </td>
+                                                        <td className="px-6 py-4 text-center relative group/shot">
+                                                            {student.marks[uploadSemester]?.screenshot ? (
+                                                                <>
+                                                                    <button 
+                                                                        onClick={() => setPreviewImage(student.marks[uploadSemester]?.screenshot)}
+                                                                        className="inline-flex items-center justify-center p-2 bg-slate-100 dark:bg-slate-800 rounded-lg text-slate-500 cursor-zoom-in hover:bg-emerald-50 hover:text-emerald-600 transition-colors"
+                                                                        title="Click for full preview"
+                                                                    >
+                                                                        <Eye className="w-4 h-4" />
+                                                                    </button>
+                                                                    <div className="invisible group-hover/shot:visible absolute right-full top-1/2 -translate-y-1/2 mr-4 z-50 p-1 bg-white dark:bg-slate-800 border-2 border-indigo-500 rounded-xl shadow-2xl overflow-hidden min-w-[300px]">
+                                                                        <img 
+                                                                            src={student.marks[uploadSemester].screenshot.startsWith('data:') ? student.marks[uploadSemester].screenshot : `data:image/jpeg;base64,${student.marks[uploadSemester].screenshot}`} 
+                                                                            className="max-w-[400px] h-auto object-contain"
+                                                                            alt="Marks Section"
+                                                                        />
+                                                                    </div>
+                                                                </>
+                                                            ) : (
+                                                                <span className="text-slate-400 text-xs">—</span>
+                                                            )}
+                                                        </td>
+                                                    </>
+                                                )}
                                                 <td className="px-6 py-4 text-right overflow-visible">
                                                     <div className="flex items-center justify-end gap-3">
                                                         {student.isExtracted && (
@@ -1313,7 +1722,7 @@ export default function DeptAdminDashboard() {
                                                         )}
 
                                                         {/* Floating Academic Breakdown Popover */}
-                                                        {(selectedYear === 'SE' || selectedYear === 'TE') && (
+                                                        {(selectedYear === 'SE' || selectedYear === 'TE' || selectedYear === 'KT') && (
                                                             <div className="relative group/breakdown">
                                                                 <button
                                                                     className="p-1.5 text-slate-400 hover:text-amber-500 hover:bg-amber-50 dark:hover:bg-amber-900/10 rounded-lg transition-all"
@@ -1657,298 +2066,7 @@ function calculateAvg(marks) {
     return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : 0;
 }
 
-// =========================================================================
-// KT Examination Processing View Component
-// =========================================================================
 
-function KTProcessingView({
-    onBack,
-    ktAttempts = [],
-    ktSession,
-    setKtSession,
-    ktLevel,
-    setKtLevel,
-    ktSemester,
-    setKtSemester,
-    onUpload,
-    isLoading,
-    onSyncRegular,
-    isSyncing,
-    onRefresh,
-    onOpenReconcile,
-    onPreviewImage,
-}) {
-    const [searchTerm, setSearchTerm] = useState('');
-
-    const filtered = useMemo(() => {
-        return (ktAttempts || []).filter(item => {
-            const sid = (item.student_identifier || '').toLowerCase();
-            const sname = (item.student_name || '').toLowerCase();
-            const term = searchTerm.toLowerCase();
-            return sid.includes(term) || sname.includes(term);
-        });
-    }, [ktAttempts, searchTerm]);
-
-    const stats = useMemo(() => {
-        const total = ktAttempts.length;
-        const passed = ktAttempts.filter(a => (a.attempt_status || '').toUpperCase() === 'PASS').length;
-        const failed = ktAttempts.filter(a => (a.attempt_status || '').toUpperCase() === 'FAIL').length;
-        const withPointers = ktAttempts.filter(a => a.clearance_pointer && a.clearance_pointer.trim()).length;
-        return { total, passed, failed, withPointers };
-    }, [ktAttempts]);
-
-    return (
-        <div className="animate-fade-in space-y-6">
-            <button
-                onClick={onBack}
-                className="flex items-center gap-2 text-slate-500 hover:text-blue-600 transition-colors group mb-2"
-            >
-                <ArrowLeft className="w-4 h-4 group-hover:-translate-x-1 transition-transform" />
-                <span>Back to Dashboard</span>
-            </button>
-
-            {/* Header & Controls */}
-            <div className="bg-white dark:bg-slate-900 p-6 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-sm space-y-6">
-                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-slate-100 dark:border-slate-800 pb-5">
-                    <div>
-                        <div className="flex items-center gap-2">
-                            <span className="px-2.5 py-1 bg-rose-500/10 text-rose-600 dark:text-rose-400 font-black text-[10px] tracking-wider uppercase rounded-lg border border-rose-500/20">
-                                Multi-Attempt Processing
-                            </span>
-                            <h2 className="text-2xl font-bold text-slate-900 dark:text-white flex items-center gap-2">
-                                KT Examination Workspace
-                            </h2>
-                        </div>
-                        <p className="text-sm text-slate-500 mt-1">
-                            Upload and inspect re-examination attempts across examination sessions (FH/SH).
-                        </p>
-                    </div>
-
-                    <div className="flex flex-wrap items-center gap-2.5">
-                        <button
-                            onClick={onSyncRegular}
-                            disabled={isSyncing}
-                            className="px-3.5 py-2 text-xs font-bold text-blue-600 bg-blue-50 dark:bg-blue-900/20 hover:bg-blue-100 dark:hover:bg-blue-900/40 border border-blue-200 dark:border-blue-800/40 rounded-xl transition-all flex items-center gap-1.5"
-                            title="Sync regular student attempts into the database table for multi-attempt reconciliation"
-                        >
-                            <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
-                            <span>{isSyncing ? 'Syncing...' : 'Sync Regular Pool'}</span>
-                        </button>
-
-                        <button
-                            onClick={onRefresh}
-                            className="p-2 text-slate-500 hover:text-blue-600 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition-all"
-                            title="Refresh KT Records"
-                        >
-                            <RefreshCw className="w-4 h-4" />
-                        </button>
-
-                        <button
-                            onClick={onOpenReconcile}
-                            className="px-4 py-2 bg-gradient-to-r from-indigo-600 to-blue-600 text-white text-xs font-bold rounded-xl flex items-center gap-2 shadow-lg shadow-indigo-500/20 hover:opacity-95 transition-all"
-                        >
-                            <FileSpreadsheet className="w-4 h-4" />
-                            <span>Run Reconciliation & Output</span>
-                        </button>
-                    </div>
-                </div>
-
-                {/* Scope Selectors & Upload Form */}
-                <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
-                    <div>
-                        <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1.5 block">
-                            Student Level
-                        </label>
-                        <select
-                            value={ktLevel}
-                            onChange={(e) => setKtLevel(e.target.value)}
-                            className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-sm font-semibold text-slate-900 dark:text-white outline-none focus:ring-2 focus:ring-rose-500"
-                        >
-                            <option value="FE">FE (First Year)</option>
-                            <option value="SE">SE (Second Year)</option>
-                            <option value="TE">TE (Third Year)</option>
-                            <option value="BE">BE (Final Year)</option>
-                        </select>
-                    </div>
-
-                    <div>
-                        <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1.5 block">
-                            Examination Session
-                        </label>
-                        <input
-                            type="text"
-                            value={ktSession}
-                            onChange={(e) => setKtSession(e.target.value)}
-                            placeholder="e.g. SH 2026 or FH 2026"
-                            className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-sm font-semibold text-slate-900 dark:text-white outline-none focus:ring-2 focus:ring-rose-500"
-                        />
-                    </div>
-
-                    <div>
-                        <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1.5 block">
-                            Semester
-                        </label>
-                        <select
-                            value={ktSemester}
-                            onChange={(e) => setKtSemester(e.target.value)}
-                            className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-sm font-semibold text-slate-900 dark:text-white outline-none focus:ring-2 focus:ring-rose-500"
-                        >
-                            {[1, 2, 3, 4, 5, 6, 7, 8].map(s => (
-                                <option key={s} value={`sem${s}`}>Semester {s}</option>
-                            ))}
-                        </select>
-                    </div>
-
-                    <div>
-                        <label className={`w-full py-2.5 px-4 bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-2 shadow-lg shadow-rose-500/20 cursor-pointer transition-all ${isLoading ? 'opacity-50 pointer-events-none' : ''}`}>
-                            <Upload className="w-4 h-4" />
-                            <span>{isLoading ? 'Processing PDF OCR...' : 'Import KT PDF'}</span>
-                            <input
-                                type="file"
-                                accept="application/pdf"
-                                className="hidden"
-                                onChange={onUpload}
-                                disabled={isLoading}
-                            />
-                        </label>
-                    </div>
-                </div>
-
-                {/* Quick Metric Cards */}
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 pt-2">
-                    <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/50 border border-slate-100 dark:border-slate-800">
-                        <div className="text-xs font-medium text-slate-400">Total KT Records</div>
-                        <div className="text-2xl font-extrabold text-slate-900 dark:text-white mt-1">{stats.total}</div>
-                    </div>
-                    <div className="p-4 rounded-2xl bg-emerald-50/60 dark:bg-emerald-950/20 border border-emerald-200/50 dark:border-emerald-800/30">
-                        <div className="text-xs font-bold text-emerald-600 dark:text-emerald-400">Passed KT Attempts</div>
-                        <div className="text-2xl font-extrabold text-emerald-600 dark:text-emerald-400 mt-1">{stats.passed}</div>
-                    </div>
-                    <div className="p-4 rounded-2xl bg-rose-50/60 dark:bg-rose-950/20 border border-rose-200/50 dark:border-rose-800/30">
-                        <div className="text-xs font-bold text-rose-600 dark:text-rose-400">Failed KT Attempts</div>
-                        <div className="text-2xl font-extrabold text-rose-600 dark:text-rose-400 mt-1">{stats.failed}</div>
-                    </div>
-                    <div className="p-4 rounded-2xl bg-purple-50/60 dark:bg-purple-950/20 border border-purple-200/50 dark:border-purple-800/30">
-                        <div className="text-xs font-bold text-purple-600 dark:text-purple-400">With Clearance Pointer</div>
-                        <div className="text-2xl font-extrabold text-purple-600 dark:text-purple-400 mt-1">{stats.withPointers}</div>
-                    </div>
-                </div>
-            </div>
-
-            {/* KT Attempts Table */}
-            <div className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden">
-                <div className="p-4 border-b border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row justify-between items-center gap-3">
-                    <div className="relative w-full sm:w-80">
-                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                        <input
-                            type="text"
-                            placeholder="Filter by ERN, Seat or Name..."
-                            value={searchTerm}
-                            onChange={(e) => setSearchTerm(e.target.value)}
-                            className="w-full pl-9 pr-4 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-xs focus:ring-2 focus:ring-rose-500 outline-none text-slate-900 dark:text-white"
-                        />
-                    </div>
-                    <div className="text-xs text-slate-400 font-medium">
-                        Showing {filtered.length} of {ktAttempts.length} KT attempts
-                    </div>
-                </div>
-
-                <div className="overflow-x-auto">
-                    <table className="w-full text-xs text-left">
-                        <thead>
-                            <tr className="bg-slate-50 dark:bg-slate-800/50 border-b border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 uppercase tracking-wider text-[10px]">
-                                <th className="px-5 py-3.5 font-bold">Student Identifier</th>
-                                <th className="px-5 py-3.5 font-bold">Student Name</th>
-                                <th className="px-4 py-3.5 font-bold text-center">Level</th>
-                                <th className="px-4 py-3.5 font-bold text-center">Session</th>
-                                <th className="px-4 py-3.5 font-bold text-center">Semester</th>
-                                <th className="px-4 py-3.5 font-bold text-center">Status</th>
-                                <th className="px-4 py-3.5 font-bold text-center">GPA</th>
-                                <th className="px-5 py-3.5 font-bold">Clearance Pointer</th>
-                                <th className="px-5 py-3.5 font-bold">Source PDF</th>
-                                <th className="px-4 py-3.5 font-bold text-center">Evidence</th>
-                            </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100 dark:divide-slate-800 text-slate-700 dark:text-slate-300">
-                            {filtered.length > 0 ? (
-                                filtered.map((att, idx) => {
-                                    const isPass = (att.attempt_status || '').toUpperCase() === 'PASS';
-                                    return (
-                                        <tr key={att.attempt_id || idx} className="hover:bg-slate-50/60 dark:hover:bg-slate-800/40 transition-colors">
-                                            <td className="px-5 py-3.5 font-mono font-bold text-slate-900 dark:text-white">
-                                                {att.student_identifier || 'N/A'}
-                                            </td>
-                                            <td className="px-5 py-3.5 font-medium">
-                                                {att.student_name || <span className="text-slate-400 italic">Unassigned</span>}
-                                            </td>
-                                            <td className="px-4 py-3.5 text-center">
-                                                <span className="px-2 py-0.5 bg-slate-100 dark:bg-slate-800 rounded font-semibold text-[10px]">
-                                                    {att.student_level || ktLevel}
-                                                </span>
-                                            </td>
-                                            <td className="px-4 py-3.5 text-center font-semibold text-slate-600 dark:text-slate-400">
-                                                {att.exam_session}
-                                            </td>
-                                            <td className="px-4 py-3.5 text-center font-mono">
-                                                {att.semester}
-                                            </td>
-                                            <td className="px-4 py-3.5 text-center">
-                                                <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full font-black text-[10px] tracking-wide border ${
-                                                    isPass
-                                                        ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-600 dark:text-emerald-400 border-emerald-500/30'
-                                                        : 'bg-rose-50 dark:bg-rose-950/40 text-rose-600 dark:text-rose-400 border-rose-500/30'
-                                                }`}>
-                                                    {isPass ? <CheckCircle2 className="w-3 h-3" /> : <AlertTriangle className="w-3 h-3" />}
-                                                    {att.attempt_status}
-                                                </span>
-                                            </td>
-                                            <td className="px-4 py-3.5 text-center font-mono font-bold">
-                                                {Number(att.gpa || 0).toFixed(2)}
-                                            </td>
-                                            <td className="px-5 py-3.5">
-                                                {att.clearance_pointer ? (
-                                                    <span className="px-2 py-0.5 bg-purple-50 dark:bg-purple-950/40 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800 rounded text-[10px] font-mono">
-                                                        {att.clearance_pointer}
-                                                    </span>
-                                                ) : (
-                                                    <span className="text-slate-400 text-[11px]">—</span>
-                                                )}
-                                            </td>
-                                            <td className="px-5 py-3.5 text-[11px] text-slate-500 truncate max-w-[150px]" title={att.source_pdf}>
-                                                {att.source_pdf || 'Uploaded PDF'}
-                                            </td>
-                                            <td className="px-4 py-3.5 text-center">
-                                                {att.screenshot ? (
-                                                    <button
-                                                        onClick={() => onPreviewImage(att.screenshot)}
-                                                        className="p-1 hover:bg-slate-100 dark:hover:bg-slate-800 text-blue-600 rounded transition-colors"
-                                                        title="View extraction image snippet"
-                                                    >
-                                                        <Eye className="w-4 h-4" />
-                                                    </button>
-                                                ) : (
-                                                    <span className="text-slate-400">—</span>
-                                                )}
-                                            </td>
-                                        </tr>
-                                    );
-                                })
-                            ) : (
-                                <tr>
-                                    <td colSpan={10} className="px-6 py-12 text-center text-slate-400">
-                                        <Layers className="w-8 h-8 mx-auto mb-2 opacity-40" />
-                                        <p className="font-semibold">No KT examination records found.</p>
-                                        <p className="text-xs text-slate-500 mt-1">Import a KT examination PDF above or refresh records.</p>
-                                    </td>
-                                </tr>
-                            )}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-    );
-}
 
 
 // =========================================================================
@@ -2002,7 +2120,7 @@ function ReconciliationModal({
                             </h3>
                         </div>
                         <p className="text-xs text-slate-500 mt-1">
-                            Reconciles multiple attempts, establishes KT clearance evidence, and generates standardized 3-sheet Excel.
+                            Reconciles multiple attempts, establishes KT clearance evidence, and generates standardized 4-sheet Excel (including Sem 1-8 Clearance Analysis).
                         </p>
                     </div>
                     <button
@@ -2095,8 +2213,14 @@ function ReconciliationModal({
                             </div>
                         </div>
                     ) : (
-                        <div className="p-6 text-center text-slate-400 bg-slate-50 dark:bg-slate-800/40 rounded-2xl border border-slate-200 dark:border-slate-800">
-                            Click "Run Reconciliation" above to process stored regular and KT attempts.
+                        <div className="p-8 text-center bg-slate-50 dark:bg-slate-800/40 rounded-2xl border border-dashed border-slate-300 dark:border-slate-700 space-y-3">
+                            <div className="w-12 h-12 mx-auto rounded-full bg-indigo-50 dark:bg-indigo-950/40 text-indigo-600 dark:text-indigo-400 flex items-center justify-center">
+                                <FileSpreadsheet className="w-6 h-6" />
+                            </div>
+                            <div className="font-bold text-slate-800 dark:text-slate-200">No examination attempts processed yet for {reconcileLevel}</div>
+                            <p className="text-xs text-slate-500 max-w-md mx-auto">
+                                Scan and finalize regular and KT marksheets on the dashboard to populate live records for reconciliation.
+                            </p>
                         </div>
                     )}
 
